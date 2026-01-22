@@ -41,6 +41,9 @@ export default function FileUploader() {
     progress: 0,
     error: null,
   });
+  const [password, setPassword] = useState("");
+  const [usePassword, setUsePassword] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const peerConnection = useRef<RTCPeerConnection | null>(null);
   const dataChannel = useRef<RTCDataChannel | null>(null);
@@ -53,7 +56,6 @@ export default function FileUploader() {
   };
 
   const handleFileSelect = useCallback(async (file: File) => {
-    // Reset state
     updateState({
       file,
       shareUrl: null,
@@ -85,11 +87,11 @@ export default function FileUploader() {
       updateState({ progress: 50 });
 
       // Create room
-      const roomId = uuidv4();
+      const roomId = uuidv4().slice(0, 8); // Shorter room ID for easier sharing
       await signaling.createRoom(roomId);
       updateState({ progress: 60 });
 
-      // Generate share URL
+      // Generate share URL with optional password indicator
       const shareUrl = `${window.location.origin}/d/${roomId}#${keyString}`;
       updateState({ shareUrl, connectionState: "waiting", progress: 100 });
 
@@ -110,14 +112,12 @@ export default function FileUploader() {
     });
     dataChannel.current = createDataChannel(peerConnection.current);
 
-    // Handle ICE candidates
     peerConnection.current.onicecandidate = (event) => {
       if (event.candidate) {
         signaling.sendIceCandidate(event.candidate.toJSON());
       }
     };
 
-    // When peer joins, create and send offer
     signaling.on("peer-joined", async () => {
       updateState({ connectionState: "connecting" });
 
@@ -134,7 +134,6 @@ export default function FileUploader() {
       }
     });
 
-    // Handle answer from receiver
     signaling.on("answer", async (sdp) => {
       try {
         await peerConnection.current!.setRemoteDescription(sdp);
@@ -143,7 +142,6 @@ export default function FileUploader() {
       }
     });
 
-    // Handle ICE candidates from receiver
     signaling.on("ice-candidate", async (candidate) => {
       try {
         await peerConnection.current!.addIceCandidate(candidate);
@@ -152,7 +150,6 @@ export default function FileUploader() {
       }
     });
 
-    // When data channel opens, start transfer
     dataChannel.current.onopen = async () => {
       updateState({ connectionState: "transferring", progress: 0 });
 
@@ -177,7 +174,6 @@ export default function FileUploader() {
     });
   }, [state.connectionState]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       dataChannel.current?.close();
@@ -206,6 +202,8 @@ export default function FileUploader() {
   const copyToClipboard = useCallback(() => {
     if (state.shareUrl) {
       navigator.clipboard.writeText(state.shareUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
     }
   }, [state.shareUrl]);
 
@@ -222,13 +220,13 @@ export default function FileUploader() {
       case "idle":
         return "Select a file to share";
       case "creating":
-        return "Encrypting file...";
+        return "Encrypting your file...";
       case "waiting":
-        return "Waiting for recipient to connect...";
+        return "Waiting for recipient...";
       case "connecting":
-        return "Establishing connection...";
+        return "Establishing secure connection...";
       case "transferring":
-        return "Transferring file...";
+        return "Transferring encrypted file...";
       case "complete":
         return "Transfer complete!";
       case "error":
@@ -238,93 +236,262 @@ export default function FileUploader() {
     }
   };
 
+  const reset = () => {
+    dataChannel.current?.close();
+    peerConnection.current?.close();
+    signaling.disconnect();
+    setState({
+      file: null,
+      shareUrl: null,
+      connectionState: "idle",
+      progress: 0,
+      error: null,
+    });
+    setPassword("");
+    setUsePassword(false);
+  };
+
   return (
-    <div className="w-full max-w-xl mx-auto p-6">
+    <div className="w-full">
+      {/* File Drop Zone */}
       <div
-        className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-500 transition-colors"
+        className={`
+          relative border-2 border-dashed rounded-xl p-8 text-center cursor-pointer
+          transition-all duration-200 min-h-[200px] flex flex-col items-center justify-center
+          ${
+            state.connectionState === "idle"
+              ? "border-[var(--border)] hover:border-[var(--primary)] hover:bg-[var(--primary-light)]"
+              : "border-[var(--border)] bg-[var(--card)]"
+          }
+        `}
         onDrop={handleDrop}
         onDragOver={(e) => e.preventDefault()}
-        onClick={() => document.getElementById("file-input")?.click()}
+        onClick={() =>
+          state.connectionState === "idle" &&
+          document.getElementById("file-input")?.click()
+        }
       >
         <input
           id="file-input"
           type="file"
           className="hidden"
           onChange={handleInputChange}
+          disabled={state.connectionState !== "idle"}
         />
 
-        {!state.file ? (
-          <div>
-            <div className="text-4xl mb-4">📁</div>
-            <p className="text-lg font-medium">
+        {state.connectionState === "idle" && (
+          <>
+            <div className="w-16 h-16 rounded-full bg-[var(--primary-light)] flex items-center justify-center mb-4">
+              <svg
+                className="w-8 h-8 text-[var(--primary)]"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                />
+              </svg>
+            </div>
+            <p className="text-lg font-medium text-[var(--foreground)] mb-1">
               Drop a file here or click to select
             </p>
-            <p className="text-sm text-gray-500 mt-2">
-              Files are encrypted before sharing
+            <p className="text-sm text-[var(--muted)]">
+              Your file will be encrypted before sharing
             </p>
-          </div>
-        ) : (
-          <div>
-            <div className="text-4xl mb-4">📄</div>
-            <p className="text-lg font-medium">{state.file.name}</p>
-            <p className="text-sm text-gray-500">
+          </>
+        )}
+
+        {state.file && state.connectionState !== "idle" && (
+          <div className="w-full">
+            <div className="flex items-center justify-center mb-4">
+              <div className="w-12 h-12 rounded-lg bg-[var(--accent-light)] flex items-center justify-center">
+                <svg
+                  className="w-6 h-6 text-[var(--accent)]"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                  />
+                </svg>
+              </div>
+            </div>
+            <p className="font-medium text-[var(--foreground)] truncate max-w-xs mx-auto">
+              {state.file.name}
+            </p>
+            <p className="text-sm text-[var(--muted)]">
               {formatBytes(state.file.size)}
             </p>
           </div>
         )}
       </div>
 
-      {/* Status section */}
-      <div className="mt-6">
-        <p className="text-center text-gray-600 mb-4">{getStatusMessage()}</p>
+      {/* Password Option */}
+      {state.connectionState === "idle" && (
+        <div className="mt-4">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={usePassword}
+              onChange={(e) => setUsePassword(e.target.checked)}
+              className="w-4 h-4 rounded border-[var(--border)] text-[var(--primary)] focus:ring-[var(--primary)]"
+            />
+            <span className="text-sm text-[var(--muted)]">
+              Add password protection
+            </span>
+          </label>
 
-        {state.connectionState !== "idle" &&
-          state.connectionState !== "waiting" &&
-          state.connectionState !== "complete" &&
-          state.connectionState !== "error" && (
-            <div className="w-full bg-gray-200 rounded-full h-2">
+          {usePassword && (
+            <input
+              type="password"
+              placeholder="Enter a password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="mt-3 w-full px-4 py-2 rounded-lg border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)] placeholder:text-[var(--muted)] focus:border-[var(--primary)] focus:outline-none"
+            />
+          )}
+        </div>
+      )}
+
+      {/* Status & Progress */}
+      {state.connectionState !== "idle" && (
+        <div className="mt-6">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-[var(--foreground)]">
+              {getStatusMessage()}
+            </span>
+            {state.connectionState === "transferring" && (
+              <span className="text-sm text-[var(--muted)]">
+                {state.progress}%
+              </span>
+            )}
+          </div>
+
+          {(state.connectionState === "creating" ||
+            state.connectionState === "connecting" ||
+            state.connectionState === "transferring") && (
+            <div className="w-full h-2 bg-[var(--border)] rounded-full overflow-hidden">
               <div
-                className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                className="h-full bg-[var(--primary)] rounded-full transition-all duration-300"
                 style={{ width: `${state.progress}%` }}
               />
             </div>
           )}
 
-        {state.shareUrl && state.connectionState === "waiting" && (
-          <div className="mt-4 p-4 bg-gray-100 rounded-lg">
-            <p className="text-sm font-medium mb-2">Share this link:</p>
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={state.shareUrl}
-                readOnly
-                className="flex-1 px-3 py-2 text-sm bg-white border rounded truncate"
-              />
-              <button
-                onClick={copyToClipboard}
-                className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
-              >
-                Copy
-              </button>
+          {state.connectionState === "waiting" && (
+            <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
+              <div className="w-2 h-2 bg-[var(--warning)] rounded-full animate-pulse" />
+              <span>Keep this page open until transfer completes</span>
             </div>
-            <p className="text-xs text-gray-500 mt-2">
-              Keep this page open until the recipient downloads the file
-            </p>
-          </div>
-        )}
+          )}
+        </div>
+      )}
 
-        {state.connectionState === "complete" && (
-          <div className="mt-4 p-4 bg-green-100 text-green-700 rounded-lg text-center">
-            ✓ File transferred successfully!
+      {/* Share Link */}
+      {state.shareUrl && state.connectionState === "waiting" && (
+        <div className="mt-6 p-4 rounded-xl bg-[var(--card)] border border-[var(--border)]">
+          <p className="text-sm font-medium text-[var(--foreground)] mb-3">
+            Share this link:
+          </p>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={state.shareUrl}
+              readOnly
+              className="flex-1 px-3 py-2 text-sm bg-[var(--background)] border border-[var(--border)] rounded-lg font-mono truncate"
+            />
+            <button
+              onClick={copyToClipboard}
+              className={`px-4 py-2 rounded-lg font-medium text-sm transition-colors ${
+                copied
+                  ? "bg-[var(--accent)] text-white"
+                  : "bg-[var(--primary)] text-white hover:bg-[var(--primary-hover)]"
+              }`}
+            >
+              {copied ? "Copied!" : "Copy"}
+            </button>
           </div>
-        )}
+        </div>
+      )}
 
-        {state.connectionState === "error" && (
-          <div className="mt-4 p-4 bg-red-100 text-red-700 rounded-lg text-center">
-            ✗ {state.error}
+      {/* Success State */}
+      {state.connectionState === "complete" && (
+        <div className="mt-6 p-4 rounded-xl bg-[var(--accent-light)] border border-[var(--accent)]">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-full bg-[var(--accent)] flex items-center justify-center">
+              <svg
+                className="w-5 h-5 text-white"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M5 13l4 4L19 7"
+                />
+              </svg>
+            </div>
+            <div>
+              <p className="font-medium text-[var(--foreground)]">
+                Transfer complete!
+              </p>
+              <p className="text-sm text-[var(--muted)]">
+                Your file was securely delivered
+              </p>
+            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* Error State */}
+      {state.connectionState === "error" && (
+        <div className="mt-6 p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-[var(--error)]">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-full bg-[var(--error)] flex items-center justify-center">
+              <svg
+                className="w-5 h-5 text-white"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </div>
+            <div>
+              <p className="font-medium text-[var(--foreground)]">
+                Something went wrong
+              </p>
+              <p className="text-sm text-[var(--muted)]">{state.error}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reset Button */}
+      {(state.connectionState === "complete" ||
+        state.connectionState === "error") && (
+        <button
+          onClick={reset}
+          className="mt-4 w-full py-3 rounded-xl border border-[var(--border)] text-[var(--foreground)] font-medium hover:bg-[var(--card-hover)] transition-colors"
+        >
+          Share another file
+        </button>
+      )}
     </div>
   );
 }
