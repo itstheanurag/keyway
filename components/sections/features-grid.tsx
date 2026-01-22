@@ -48,7 +48,8 @@ export function FeaturesGrid() {
             for audit. No hidden backdoors.
           </p>
           <Link
-            href="#"
+            href="https://github.com/itstheanurag/keyway"
+            target="_blank"
             className="inline-flex items-center gap-2 text-orange-400 hover:text-orange-300 font-medium text-lg"
           >
             View Repository <ArrowRight className="w-5 h-5" />

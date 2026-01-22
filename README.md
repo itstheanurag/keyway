@@ -1,36 +1,190 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+<p align="center">
+  <img src="public/mascot.png" alt="Keyway Logo" width="120" />
+</p>
 
-## Getting Started
+<h1 align="center">Keyway</h1>
 
-First, run the development server:
+<p align="center">
+  <strong>Secure, peer-to-peer file sharing with end-to-end encryption</strong>
+</p>
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+<p align="center">
+  No servers. No storage. No trace left behind.
+</p>
+
+---
+
+## What is Keyway?
+
+Keyway is an open-source file sharing application that transfers files **directly between browsers** using WebRTC. All files are encrypted with **AES-256** on your device before transmission — the server never sees your data.
+
+### Key Features
+
+- **🔐 End-to-End Encryption** — Files encrypted with AES-256-GCM before leaving your device
+- **📡 Peer-to-Peer Transfer** — Direct browser-to-browser, no server storage
+- **🔑 Optional Password Protection** — Add an extra layer with PBKDF2-derived keys
+- **🚀 No File Size Limits** — Limited only by browser memory
+- **🕵️ Zero-Knowledge** — Server only facilitates connections, never sees content
+
+## How It Works
+
+```
+1. SENDER selects a file
+2. File is encrypted in the browser (AES-256-GCM)
+3. A unique share link is generated (contains room ID + encryption key)
+4. RECEIVER opens the link
+5. Direct WebRTC connection is established
+6. Encrypted file transfers peer-to-peer
+7. RECEIVER decrypts and downloads the file
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The encryption key is stored in the URL fragment (`#hash`) — it's **never sent to any server**.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Quick Start
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Prerequisites
 
-## Learn More
+- Node.js 18+ or Bun
+- npm, yarn, or bun
 
-To learn more about Next.js, take a look at the following resources:
+### Installation
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/keyway.git
+cd keyway
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+# Install dependencies
+npm install
+# or
+bun install
+```
 
-## Deploy on Vercel
+### Development
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+# Start both frontend and signaling server
+npm run dev:all
+# or
+bun run dev:all
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+### Production Build
+
+```bash
+# Build the frontend
+npm run build
+
+# Start production servers
+npm run start:all
+```
+
+## Project Structure
+
+```
+keyway/
+├── app/                    # Next.js App Router
+│   ├── page.tsx           # Home page
+│   ├── d/[roomId]/        # Download page
+│   └── receive/           # Manual receive page
+├── components/            # React components
+│   ├── FileUploader.tsx   # Upload UI
+│   ├── FileDownloader.tsx # Download UI
+│   ├── layout/            # Navbar, Footer
+│   └── sections/          # Home page sections
+├── hooks/                 # Custom React hooks
+│   ├── use-file-uploader.ts
+│   └── use-file-downloader.ts
+├── lib/                   # Core utilities
+│   ├── crypto.ts          # Encryption functions
+│   ├── peer.ts            # WebRTC helpers
+│   └── signaling.ts       # Socket.io client
+├── server/                # Signaling server
+│   └── signaling.ts       # WebSocket server
+└── public/                # Static assets
+```
+
+## Deployment
+
+### Architecture
+
+Keyway requires two components:
+
+| Component            | Description                         | Platforms               |
+| -------------------- | ----------------------------------- | ----------------------- |
+| **Frontend**         | Next.js application                 | Vercel, Netlify, Render |
+| **Signaling Server** | WebSocket server for peer discovery | Railway, Render, Fly.io |
+
+> ⚠️ **Important**: Vercel and Netlify are serverless and cannot host the signaling server. Deploy it separately on Railway or Render.
+
+### Environment Variables
+
+```env
+NEXT_PUBLIC_SIGNALING_URL=https://your-signaling-server.railway.app
+```
+
+### Deploy to Vercel (Frontend Only)
+
+1. Push to GitHub
+2. Import to Vercel
+3. Set `NEXT_PUBLIC_SIGNALING_URL` environment variable
+4. Deploy
+
+### Deploy Signaling Server to Railway
+
+1. Create new Railway project
+2. Connect `server/signaling.ts`
+3. Set `PORT` environment variable (Railway provides this automatically)
+4. Deploy
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed deployment instructions.
+
+## Security
+
+### Encryption
+
+- **Algorithm**: AES-256-GCM (authenticated encryption)
+- **Key Generation**: Web Crypto API (cryptographically secure)
+- **Password Derivation**: PBKDF2-SHA256 with 100,000 iterations
+
+### Privacy
+
+- Files are **never stored** on any server
+- Encryption keys exist **only in the browser** and URL fragment
+- The signaling server **cannot decrypt** your files
+- No analytics, no tracking, no logs
+
+## Scripts
+
+| Command              | Description                       |
+| -------------------- | --------------------------------- |
+| `npm run dev`        | Start Next.js development server  |
+| `npm run dev:server` | Start signaling server (dev mode) |
+| `npm run dev:all`    | Start both concurrently           |
+| `npm run build`      | Build for production              |
+| `npm run start`      | Start production Next.js server   |
+| `npm run start:all`  | Start both production servers     |
+
+## Tech Stack
+
+- **Frontend**: Next.js 16, React 19, TypeScript
+- **Styling**: Tailwind CSS, Framer Motion
+- **Signaling**: Node.js, Socket.io
+- **Encryption**: Web Crypto API
+- **P2P**: WebRTC Data Channels
+
+## Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request.
+
+## License
+
+MIT License — see [LICENSE](./LICENSE) for details.
+
+---
+
+<p align="center">
+  Made with ❤️ for privacy
+</p>
