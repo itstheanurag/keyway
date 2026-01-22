@@ -47,23 +47,6 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0f0f0f;
-    --foreground: #f5f5f5;
-    --primary: #f39c12;
-    --primary-hover: #e67e22;
-    --primary-light: #2a2014;
-    --accent: #2ecc71;
-    --accent-hover: #27ae60;
-    --accent-light: #142a1c;
-    --muted: #9ca3af;
-    --border: #2a2a2a;
-    --card: #1a1a1a;
-    --card-hover: #222222;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
@@ -74,6 +57,23 @@ body {
     "Segoe UI",
     Roboto,
     sans-serif;
+  color-scheme: light only;
+}
+
+/* Force light mode on all elements */
+html {
+  color-scheme: light only;
+}
+
+/* Force input visibility */
+input,
+textarea {
+  color: #1a1a1a !important;
+  background-color: #ffffff !important;
+}
+
+input::placeholder {
+  color: #9ca3af !important;
 }
 
 /* Smooth transitions */
@@ -93,4 +93,13 @@ body {
 ::selection {
   background: var(--primary-light);
   color: var(--foreground);
+}
+
+/* Input text color assurance */
+input {
+  color: var(--foreground);
+}
+
+input::placeholder {
+  color: var(--muted);
 }

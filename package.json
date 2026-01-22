@@ -5,9 +5,11 @@
   "scripts": {
     "dev": "next dev",
     "dev:server": "tsx watch server/signaling.ts",
-    "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\"",
+    "dev:all": "concurrently \"bun run dev\" \"bun run dev:server\"",
     "build": "next build",
     "start": "next start",
+    "start:server": "tsx server/signaling.ts",
+    "start:all": "concurrently \"bun run start\" \"bun run start:server\"",
     "lint": "eslint"
   },
   "dependencies": {

@@ -100,10 +100,10 @@ export default function FileUploader() {
                 <Upload className="w-8 h-8 text-orange-500" />
               </div>
 
-              <h3 className="text-xl font-bold text-gray-900 mb-2">
+              <h3 className="text-xl font-bold text-[var(--muted)] mb-2">
                 Click or drag file to upload
               </h3>
-              <p className="text-gray-500 text-sm max-w-xs mx-auto mb-8">
+              <p className="text-[var(--muted)] text-sm max-w-xs mx-auto mb-8">
                 Files are encrypted with AES-256 before leaving your device.
               </p>
 
@@ -111,9 +111,9 @@ export default function FileUploader() {
                 className="w-full max-w-xs text-left"
                 onClick={(e) => e.stopPropagation()}
               >
-                <label className="flex items-center gap-3 cursor-pointer p-3 rounded-xl hover:bg-white/60 transition-colors">
+                <label className="flex items-center gap-3 cursor-pointer p-3 rounded-xl">
                   <div
-                    className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${usePassword ? "bg-orange-500 border-orange-500" : "border-gray-300 bg-white"}`}
+                    className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${usePassword ? "bg-orange-500 border-orange-500" : "border-[var(--border)] bg-[var(--card)]"}`}
                   >
                     <input
                       type="checkbox"
@@ -125,7 +125,7 @@ export default function FileUploader() {
                       <Check className="w-3.5 h-3.5 text-white" />
                     )}
                   </div>
-                  <span className="text-sm font-medium text-gray-600">
+                  <span className="text-sm font-medium text-[var(--muted)]">
                     Password Protection
                   </span>
                 </label>
@@ -138,13 +138,15 @@ export default function FileUploader() {
                       exit={{ height: 0, opacity: 0 }}
                       className="overflow-hidden"
                     >
-                      <input
-                        type="password"
-                        placeholder="Enter password..."
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        className="w-full mt-2 px-4 py-2.5 rounded-xl border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-100 focus:border-orange-300 text-sm transition-all"
-                      />
+                      <div className="p-1">
+                        <input
+                          type="password"
+                          placeholder="Enter password..."
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          className="w-full mt-1 px-4 py-2.5 rounded-xl border border-gray-300 bg-white text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-500/30 focus:border-orange-500 text-sm transition-all"
+                        />
+                      </div>
                     </motion.div>
                   )}
                 </AnimatePresence>
@@ -182,12 +184,12 @@ export default function FileUploader() {
                   className={
                     state.connectionState === "error"
                       ? "text-red-500"
-                      : "text-gray-900"
+                      : "text-[var(--muted)]"
                   }
                 >
                   {state.error || getStatusText()}
                 </span>
-                <span className="text-gray-500">
+                <span className="text-[var(--muted)]">
                   {Math.round(state.progress)}%
                 </span>
               </div>
@@ -207,10 +209,10 @@ export default function FileUploader() {
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="mt-8 p-4 bg-gray-50 rounded-2xl border border-gray-100"
+                className="mt-8 p-4 bg-gray-50 rounded-2xl border border-gray-100 text-[var(--muted)]"
               >
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                  <span className="text-xs font-bold uppercase tracking-wider">
                     Share Link
                   </span>
                 </div>
@@ -218,11 +220,11 @@ export default function FileUploader() {
                   <input
                     readOnly
                     value={state.shareUrl}
-                    className="flex-1 bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-600 font-mono focus:outline-none"
+                    className="flex-1 bg-white border border-gray-300 rounded-xl px-3 py-2 text-sm text-gray-900 font-mono focus:outline-none"
                   />
                   <button
                     onClick={copyToClipboard}
-                    className="p-2 bg-white border border-gray-200 rounded-xl hover:bg-orange-50 hover:border-orange-200 hover:text-orange-600 transition-colors"
+                    className="p-2 bg-transparent border border-[var(--border)] rounded-xl hover:bg-orange-50 hover:border-orange-200 hover:text-orange-600 transition-colors"
                   >
                     {copied ? (
                       <Check className="w-5 h-5" />

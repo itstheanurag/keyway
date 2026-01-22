@@ -1,8 +1,9 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Shield, Github } from "lucide-react";
+import { Github } from "lucide-react";
 import Link from "next/link";
+import Image from "next/image";
 
 export function Navbar() {
   return (
@@ -14,8 +15,14 @@ export function Navbar() {
     >
       <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
         <Link href="/" className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-orange-500 flex items-center justify-center shadow-lg shadow-orange-500/20">
-            <Shield className="w-6 h-6 text-white" />
+          <div className="relative w-10 h-10 rounded-xl bg-orange-50 overflow-hidden flex items-center justify-center border border-orange-100">
+            <Image
+              src="/mascot.png"
+              alt="Keyway Logo"
+              width={40}
+              height={40}
+              className="object-contain"
+            />
           </div>
           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-gray-900 to-gray-700">
             Keyway
@@ -23,6 +30,12 @@ export function Navbar() {
         </Link>
 
         <nav className="flex items-center gap-8">
+          <Link
+            href="/receive"
+            className="text-sm font-medium text-gray-600 hover:text-orange-600 transition-colors"
+          >
+            Receive File
+          </Link>
           <Link
             href="https://github.com/itstheanurag/keyway"
             target="_blank"
