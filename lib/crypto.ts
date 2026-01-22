@@ -1,6 +1,3 @@
-// Client-side encryption using Web Crypto API
-// AES-GCM 256-bit encryption
-
 const ALGORITHM = "AES-GCM";
 const KEY_LENGTH = 256;
 const IV_LENGTH = 12; // 96 bits for GCM
@@ -12,6 +9,36 @@ export async function generateKey(): Promise<CryptoKey> {
   return await crypto.subtle.generateKey(
     { name: ALGORITHM, length: KEY_LENGTH },
     true, // extractable
+    ["encrypt", "decrypt"],
+  );
+}
+
+/**
+ * Derive a key from a password and salt using PBKDF2
+ */
+export async function deriveKeyFromPassword(
+  password: string,
+  salt: Uint8Array,
+): Promise<CryptoKey> {
+  const enc = new TextEncoder();
+  const passwordKey = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(password),
+    { name: "PBKDF2" },
+    false,
+    ["deriveKey"],
+  );
+
+  return await crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: salt as BufferSource,
+      iterations: 100000,
+      hash: "SHA-256",
+    },
+    passwordKey,
+    { name: ALGORITHM, length: KEY_LENGTH },
+    false, // not extractable
     ["encrypt", "decrypt"],
   );
 }
@@ -36,6 +63,13 @@ export async function importKey(keyStr: string): Promise<CryptoKey> {
     false,
     ["decrypt"],
   );
+}
+
+/**
+ * Generate a random salt
+ */
+export function generateSalt(): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(16));
 }
 
 /**
@@ -115,7 +149,7 @@ export async function decryptFile(
 }
 
 // Utility functions
-function arrayBufferToBase64Url(buffer: ArrayBuffer): string {
+export function arrayBufferToBase64Url(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = "";
   for (let i = 0; i < bytes.length; i++) {
@@ -127,7 +161,7 @@ function arrayBufferToBase64Url(buffer: ArrayBuffer): string {
     .replace(/=+$/, "");
 }
 
-function base64UrlToArrayBuffer(base64url: string): ArrayBuffer {
+export function base64UrlToArrayBuffer(base64url: string): ArrayBuffer {
   const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
   const padding = "=".repeat((4 - (base64.length % 4)) % 4);
   const binary = atob(base64 + padding);
@@ -142,4 +176,6 @@ export interface FileMetadata {
   name: string;
   mimeType: string;
   size: number;
+  isPasswordProtected?: boolean;
+  salt?: string; // base64url encoded salt
 }

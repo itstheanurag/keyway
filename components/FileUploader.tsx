@@ -1,202 +1,35 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
-import { v4 as uuidv4 } from "uuid";
-import {
-  generateKey,
-  exportKey,
-  encryptFile,
-  type FileMetadata,
-} from "@/lib/crypto";
-import {
-  createPeerConnection,
-  createDataChannel,
-  sendFile,
-  DEFAULT_ICE_SERVERS,
-} from "@/lib/peer";
-import { signaling } from "@/lib/signaling";
-
-type ConnectionState =
-  | "idle"
-  | "creating"
-  | "waiting"
-  | "connecting"
-  | "transferring"
-  | "complete"
-  | "error";
-
-interface FileUploaderState {
-  file: File | null;
-  shareUrl: string | null;
-  connectionState: ConnectionState;
-  progress: number;
-  error: string | null;
-}
+import { useState, useCallback } from "react";
+import { Upload, X, Copy, Check, Lock, File as FileIcon } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { useFileUploader } from "@/hooks/use-file-uploader";
 
 export default function FileUploader() {
-  const [state, setState] = useState<FileUploaderState>({
-    file: null,
-    shareUrl: null,
-    connectionState: "idle",
-    progress: 0,
-    error: null,
-  });
+  const { state, handleFileSelect, reset: hookReset } = useFileUploader();
+
   const [password, setPassword] = useState("");
   const [usePassword, setUsePassword] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const peerConnection = useRef<RTCPeerConnection | null>(null);
-  const dataChannel = useRef<RTCDataChannel | null>(null);
-  const encryptionKey = useRef<CryptoKey | null>(null);
-  const encryptedData = useRef<ArrayBuffer | null>(null);
-  const fileMetadata = useRef<FileMetadata | null>(null);
-
-  const updateState = (updates: Partial<FileUploaderState>) => {
-    setState((prev) => ({ ...prev, ...updates }));
-  };
-
-  const handleFileSelect = useCallback(async (file: File) => {
-    updateState({
-      file,
-      shareUrl: null,
-      connectionState: "creating",
-      progress: 0,
-      error: null,
-    });
-
-    try {
-      // Generate encryption key
-      encryptionKey.current = await generateKey();
-      const keyString = await exportKey(encryptionKey.current);
-
-      // Encrypt file
-      updateState({ progress: 10 });
-      const { encrypted, metadata } = await encryptFile(
-        file,
-        encryptionKey.current,
-        (p) => {
-          updateState({ progress: 10 + p * 0.3 });
-        },
-      );
-      encryptedData.current = encrypted;
-      fileMetadata.current = metadata;
-      updateState({ progress: 40 });
-
-      // Connect to signaling server
-      await signaling.connect();
-      updateState({ progress: 50 });
-
-      // Create room
-      const roomId = uuidv4().slice(0, 8); // Shorter room ID for easier sharing
-      await signaling.createRoom(roomId);
-      updateState({ progress: 60 });
-
-      // Generate share URL with optional password indicator
-      const shareUrl = `${window.location.origin}/d/${roomId}#${keyString}`;
-      updateState({ shareUrl, connectionState: "waiting", progress: 100 });
-
-      // Setup WebRTC
-      setupWebRTC();
-    } catch (error) {
-      console.error("Setup error:", error);
-      updateState({
-        connectionState: "error",
-        error: error instanceof Error ? error.message : "Unknown error",
-      });
-    }
-  }, []);
-
-  const setupWebRTC = useCallback(() => {
-    peerConnection.current = createPeerConnection({
-      iceServers: DEFAULT_ICE_SERVERS,
-    });
-    dataChannel.current = createDataChannel(peerConnection.current);
-
-    peerConnection.current.onicecandidate = (event) => {
-      if (event.candidate) {
-        signaling.sendIceCandidate(event.candidate.toJSON());
-      }
-    };
-
-    signaling.on("peer-joined", async () => {
-      updateState({ connectionState: "connecting" });
-
-      try {
-        const offer = await peerConnection.current!.createOffer();
-        await peerConnection.current!.setLocalDescription(offer);
-        signaling.sendOffer(offer);
-      } catch (error) {
-        console.error("Offer error:", error);
-        updateState({
-          connectionState: "error",
-          error: "Failed to create connection",
-        });
-      }
-    });
-
-    signaling.on("answer", async (sdp) => {
-      try {
-        await peerConnection.current!.setRemoteDescription(sdp);
-      } catch (error) {
-        console.error("Answer error:", error);
-      }
-    });
-
-    signaling.on("ice-candidate", async (candidate) => {
-      try {
-        await peerConnection.current!.addIceCandidate(candidate);
-      } catch (error) {
-        console.error("ICE error:", error);
-      }
-    });
-
-    dataChannel.current.onopen = async () => {
-      updateState({ connectionState: "transferring", progress: 0 });
-
-      try {
-        await sendFile(
-          dataChannel.current!,
-          encryptedData.current!,
-          fileMetadata.current!,
-          (progress) => updateState({ progress }),
-        );
-        updateState({ connectionState: "complete", progress: 100 });
-      } catch (error) {
-        console.error("Transfer error:", error);
-        updateState({ connectionState: "error", error: "Transfer failed" });
-      }
-    };
-
-    signaling.on("peer-disconnected", () => {
-      if (state.connectionState !== "complete") {
-        updateState({ connectionState: "error", error: "Peer disconnected" });
-      }
-    });
-  }, [state.connectionState]);
-
-  useEffect(() => {
-    return () => {
-      dataChannel.current?.close();
-      peerConnection.current?.close();
-      signaling.disconnect();
-    };
-  }, []);
-
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
+      e.stopPropagation();
       const file = e.dataTransfer.files[0];
-      if (file) handleFileSelect(file);
+      if (file)
+        handleFileSelect(file, usePassword && password ? password : undefined);
     },
-    [handleFileSelect],
+    [handleFileSelect, usePassword, password],
   );
 
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
-      if (file) handleFileSelect(file);
+      if (file)
+        handleFileSelect(file, usePassword && password ? password : undefined);
     },
-    [handleFileSelect],
+    [handleFileSelect, usePassword, password],
   );
 
   const copyToClipboard = useCallback(() => {
@@ -207,291 +40,218 @@ export default function FileUploader() {
     }
   }, [state.shareUrl]);
 
-  const formatBytes = (bytes: number) => {
-    if (bytes === 0) return "0 Bytes";
-    const k = 1024;
-    const sizes = ["Bytes", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  const reset = () => {
+    hookReset();
+    setPassword("");
+    setUsePassword(false);
   };
 
-  const getStatusMessage = () => {
+  const getStatusText = () => {
     switch (state.connectionState) {
       case "idle":
-        return "Select a file to share";
+        return "Drop file to upload";
       case "creating":
-        return "Encrypting your file...";
+        return "Encrypting file...";
       case "waiting":
-        return "Waiting for recipient...";
+        return "Waiting for peer...";
       case "connecting":
-        return "Establishing secure connection...";
+        return "Connecting to peer...";
       case "transferring":
-        return "Transferring encrypted file...";
+        return "Transferring file...";
       case "complete":
-        return "Transfer complete!";
+        return "Transfer Completed";
       case "error":
-        return state.error || "An error occurred";
+        return "Error Occurred";
       default:
         return "";
     }
   };
 
-  const reset = () => {
-    dataChannel.current?.close();
-    peerConnection.current?.close();
-    signaling.disconnect();
-    setState({
-      file: null,
-      shareUrl: null,
-      connectionState: "idle",
-      progress: 0,
-      error: null,
-    });
-    setPassword("");
-    setUsePassword(false);
-  };
-
   return (
     <div className="w-full">
-      {/* File Drop Zone */}
-      <div
-        className={`
-          relative border-2 border-dashed rounded-xl p-8 text-center cursor-pointer
-          transition-all duration-200 min-h-[200px] flex flex-col items-center justify-center
-          ${
-            state.connectionState === "idle"
-              ? "border-[var(--border)] hover:border-[var(--primary)] hover:bg-[var(--primary-light)]"
-              : "border-[var(--border)] bg-[var(--card)]"
-          }
-        `}
-        onDrop={handleDrop}
-        onDragOver={(e) => e.preventDefault()}
-        onClick={() =>
-          state.connectionState === "idle" &&
-          document.getElementById("file-input")?.click()
-        }
-      >
-        <input
-          id="file-input"
-          type="file"
-          className="hidden"
-          onChange={handleInputChange}
-          disabled={state.connectionState !== "idle"}
-        />
+      <AnimatePresence mode="wait">
+        {state.connectionState === "idle" ? (
+          <motion.div
+            key="upload"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="group relative"
+          >
+            <div
+              className="
+                relative flex flex-col items-center justify-center p-12 text-center
+                border-2 border-dashed border-gray-200 rounded-3xl
+                bg-gray-50/50 hover:bg-orange-50/30 hover:border-orange-200 transition-all duration-300
+                cursor-pointer
+              "
+              onDrop={handleDrop}
+              onDragOver={(e) => e.preventDefault()}
+              onClick={() => document.getElementById("file-input")?.click()}
+            >
+              <input
+                id="file-input"
+                type="file"
+                className="hidden"
+                onChange={handleInputChange}
+              />
 
-        {state.connectionState === "idle" && (
-          <>
-            <div className="w-16 h-16 rounded-full bg-[var(--primary-light)] flex items-center justify-center mb-4">
-              <svg
-                className="w-8 h-8 text-[var(--primary)]"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
+              <div className="w-16 h-16 rounded-2xl bg-white shadow-sm border border-gray-100 flex items-center justify-center mb-6 group-hover:scale-110 transition-transform duration-300">
+                <Upload className="w-8 h-8 text-orange-500" />
+              </div>
+
+              <h3 className="text-xl font-bold text-gray-900 mb-2">
+                Click or drag file to upload
+              </h3>
+              <p className="text-gray-500 text-sm max-w-xs mx-auto mb-8">
+                Files are encrypted with AES-256 before leaving your device.
+              </p>
+
+              <div
+                className="w-full max-w-xs text-left"
+                onClick={(e) => e.stopPropagation()}
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
-                />
-              </svg>
-            </div>
-            <p className="text-lg font-medium text-[var(--foreground)] mb-1">
-              Drop a file here or click to select
-            </p>
-            <p className="text-sm text-[var(--muted)]">
-              Your file will be encrypted before sharing
-            </p>
-          </>
-        )}
+                <label className="flex items-center gap-3 cursor-pointer p-3 rounded-xl hover:bg-white/60 transition-colors">
+                  <div
+                    className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${usePassword ? "bg-orange-500 border-orange-500" : "border-gray-300 bg-white"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={usePassword}
+                      onChange={(e) => setUsePassword(e.target.checked)}
+                      className="hidden"
+                    />
+                    {usePassword && (
+                      <Check className="w-3.5 h-3.5 text-white" />
+                    )}
+                  </div>
+                  <span className="text-sm font-medium text-gray-600">
+                    Password Protection
+                  </span>
+                </label>
 
-        {state.file && state.connectionState !== "idle" && (
-          <div className="w-full">
-            <div className="flex items-center justify-center mb-4">
-              <div className="w-12 h-12 rounded-lg bg-[var(--accent-light)] flex items-center justify-center">
-                <svg
-                  className="w-6 h-6 text-[var(--accent)]"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                  />
-                </svg>
+                <AnimatePresence>
+                  {usePassword && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: "auto", opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      className="overflow-hidden"
+                    >
+                      <input
+                        type="password"
+                        placeholder="Enter password..."
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        className="w-full mt-2 px-4 py-2.5 rounded-xl border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-orange-100 focus:border-orange-300 text-sm transition-all"
+                      />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             </div>
-            <p className="font-medium text-[var(--foreground)] truncate max-w-xs mx-auto">
-              {state.file.name}
-            </p>
-            <p className="text-sm text-[var(--muted)]">
-              {formatBytes(state.file.size)}
-            </p>
-          </div>
-        )}
-      </div>
+          </motion.div>
+        ) : (
+          <motion.div
+            key="status"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="p-8"
+          >
+            {/* File Info */}
+            <div className="flex items-center gap-4 mb-8">
+              <div className="w-12 h-12 rounded-xl bg-orange-100 flex items-center justify-center flex-shrink-0">
+                <FileIcon className="w-6 h-6 text-orange-600" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h4 className="font-bold text-gray-900 truncate">
+                  {state.file?.name}
+                </h4>
+                <p className="text-sm text-gray-500">
+                  {state.file
+                    ? (state.file.size / 1024 / 1024).toFixed(2) + " MB"
+                    : ""}
+                </p>
+              </div>
+            </div>
 
-      {/* Password Option */}
-      {state.connectionState === "idle" && (
-        <div className="mt-4">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={usePassword}
-              onChange={(e) => setUsePassword(e.target.checked)}
-              className="w-4 h-4 rounded border-[var(--border)] text-[var(--primary)] focus:ring-[var(--primary)]"
-            />
-            <span className="text-sm text-[var(--muted)]">
-              Add password protection
-            </span>
-          </label>
+            {/* Status Indicator */}
+            <div className="space-y-4">
+              <div className="flex justify-between text-sm font-medium">
+                <span
+                  className={
+                    state.connectionState === "error"
+                      ? "text-red-500"
+                      : "text-gray-900"
+                  }
+                >
+                  {state.error || getStatusText()}
+                </span>
+                <span className="text-gray-500">
+                  {Math.round(state.progress)}%
+                </span>
+              </div>
 
-          {usePassword && (
-            <input
-              type="password"
-              placeholder="Enter a password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="mt-3 w-full px-4 py-2 rounded-lg border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)] placeholder:text-[var(--muted)] focus:border-[var(--primary)] focus:outline-none"
-            />
-          )}
-        </div>
-      )}
+              <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                <motion.div
+                  className={`h-full ${state.connectionState === "error" ? "bg-red-500" : "bg-orange-500"}`}
+                  initial={{ width: 0 }}
+                  animate={{ width: `${state.progress}%` }}
+                  transition={{ type: "spring", stiffness: 50 }}
+                />
+              </div>
+            </div>
 
-      {/* Status & Progress */}
-      {state.connectionState !== "idle" && (
-        <div className="mt-6">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-[var(--foreground)]">
-              {getStatusMessage()}
-            </span>
-            {state.connectionState === "transferring" && (
-              <span className="text-sm text-[var(--muted)]">
-                {state.progress}%
-              </span>
+            {/* Share Link */}
+            {state.shareUrl && state.connectionState === "waiting" && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mt-8 p-4 bg-gray-50 rounded-2xl border border-gray-100"
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                    Share Link
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    readOnly
+                    value={state.shareUrl}
+                    className="flex-1 bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-600 font-mono focus:outline-none"
+                  />
+                  <button
+                    onClick={copyToClipboard}
+                    className="p-2 bg-white border border-gray-200 rounded-xl hover:bg-orange-50 hover:border-orange-200 hover:text-orange-600 transition-colors"
+                  >
+                    {copied ? (
+                      <Check className="w-5 h-5" />
+                    ) : (
+                      <Copy className="w-5 h-5" />
+                    )}
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 mt-3 text-xs text-orange-600 font-medium">
+                  <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
+                  Waiting for peer to connect...
+                </div>
+              </motion.div>
             )}
-          </div>
 
-          {(state.connectionState === "creating" ||
-            state.connectionState === "connecting" ||
-            state.connectionState === "transferring") && (
-            <div className="w-full h-2 bg-[var(--border)] rounded-full overflow-hidden">
-              <div
-                className="h-full bg-[var(--primary)] rounded-full transition-all duration-300"
-                style={{ width: `${state.progress}%` }}
-              />
-            </div>
-          )}
-
-          {state.connectionState === "waiting" && (
-            <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
-              <div className="w-2 h-2 bg-[var(--warning)] rounded-full animate-pulse" />
-              <span>Keep this page open until transfer completes</span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Share Link */}
-      {state.shareUrl && state.connectionState === "waiting" && (
-        <div className="mt-6 p-4 rounded-xl bg-[var(--card)] border border-[var(--border)]">
-          <p className="text-sm font-medium text-[var(--foreground)] mb-3">
-            Share this link:
-          </p>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={state.shareUrl}
-              readOnly
-              className="flex-1 px-3 py-2 text-sm bg-[var(--background)] border border-[var(--border)] rounded-lg font-mono truncate"
-            />
-            <button
-              onClick={copyToClipboard}
-              className={`px-4 py-2 rounded-lg font-medium text-sm transition-colors ${
-                copied
-                  ? "bg-[var(--accent)] text-white"
-                  : "bg-[var(--primary)] text-white hover:bg-[var(--primary-hover)]"
-              }`}
-            >
-              {copied ? "Copied!" : "Copy"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Success State */}
-      {state.connectionState === "complete" && (
-        <div className="mt-6 p-4 rounded-xl bg-[var(--accent-light)] border border-[var(--accent)]">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-[var(--accent)] flex items-center justify-center">
-              <svg
-                className="w-5 h-5 text-white"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
+            {(state.connectionState === "complete" ||
+              state.connectionState === "error") && (
+              <motion.button
+                onClick={reset}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="w-full mt-8 py-3 rounded-xl border border-gray-200 text-gray-600 font-bold hover:bg-gray-50 transition-colors"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M5 13l4 4L19 7"
-                />
-              </svg>
-            </div>
-            <div>
-              <p className="font-medium text-[var(--foreground)]">
-                Transfer complete!
-              </p>
-              <p className="text-sm text-[var(--muted)]">
-                Your file was securely delivered
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Error State */}
-      {state.connectionState === "error" && (
-        <div className="mt-6 p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-[var(--error)]">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-[var(--error)] flex items-center justify-center">
-              <svg
-                className="w-5 h-5 text-white"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M6 18L18 6M6 6l12 12"
-                />
-              </svg>
-            </div>
-            <div>
-              <p className="font-medium text-[var(--foreground)]">
-                Something went wrong
-              </p>
-              <p className="text-sm text-[var(--muted)]">{state.error}</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Reset Button */}
-      {(state.connectionState === "complete" ||
-        state.connectionState === "error") && (
-        <button
-          onClick={reset}
-          className="mt-4 w-full py-3 rounded-xl border border-[var(--border)] text-[var(--foreground)] font-medium hover:bg-[var(--card-hover)] transition-colors"
-        >
-          Share another file
-        </button>
-      )}
+                Send Another File
+              </motion.button>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

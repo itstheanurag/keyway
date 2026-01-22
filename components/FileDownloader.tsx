@@ -1,64 +1,23 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import { importKey, decryptFile, type FileMetadata } from "@/lib/crypto";
-import {
-  createPeerConnection,
-  receiveFile,
-  DEFAULT_ICE_SERVERS,
-} from "@/lib/peer";
-import { signaling } from "@/lib/signaling";
-
-type ConnectionState =
-  | "connecting"
-  | "receiving"
-  | "decrypting"
-  | "complete"
-  | "error";
+import { useState } from "react";
+import { Lock } from "lucide-react";
+import { useFileDownloader } from "@/hooks/use-file-downloader";
 
 interface FileDownloaderProps {
   roomId: string;
   encryptionKey: string;
 }
 
-interface DownloaderState {
-  connectionState: ConnectionState;
-  progress: number;
-  error: string | null;
-  fileName: string | null;
-  fileSize: number | null;
-}
-
 export default function FileDownloader({
   roomId,
   encryptionKey,
 }: FileDownloaderProps) {
-  const [state, setState] = useState<DownloaderState>({
-    connectionState: "connecting",
-    progress: 0,
-    error: null,
-    fileName: null,
-    fileSize: null,
-  });
-
-  const peerConnection = useRef<RTCPeerConnection | null>(null);
-  const cryptoKey = useRef<CryptoKey | null>(null);
-  const hasStarted = useRef(false);
-
-  const updateState = (updates: Partial<DownloaderState>) => {
-    setState((prev) => ({ ...prev, ...updates }));
-  };
-
-  const downloadFile = useCallback((blob: Blob, fileName: string) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = fileName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, []);
+  const { state, decryptWithPassword } = useFileDownloader(
+    roomId,
+    encryptionKey,
+  );
+  const [password, setPassword] = useState("");
 
   const formatBytes = (bytes: number) => {
     if (bytes === 0) return "0 Bytes";
@@ -68,118 +27,45 @@ export default function FileDownloader({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   };
 
-  useEffect(() => {
-    if (hasStarted.current) return;
-    hasStarted.current = true;
-
-    const start = async () => {
-      try {
-        cryptoKey.current = await importKey(encryptionKey);
-        await signaling.connect();
-        await signaling.joinRoom(roomId);
-
-        peerConnection.current = createPeerConnection({
-          iceServers: DEFAULT_ICE_SERVERS,
-        });
-
-        peerConnection.current.onicecandidate = (event) => {
-          if (event.candidate) {
-            signaling.sendIceCandidate(event.candidate.toJSON());
-          }
-        };
-
-        peerConnection.current.ondatachannel = (event) => {
-          const channel = event.channel;
-          updateState({ connectionState: "receiving" });
-
-          receiveFile(
-            channel,
-            (progress) => updateState({ progress }),
-            (metadata) =>
-              updateState({ fileName: metadata.name, fileSize: metadata.size }),
-          )
-            .then(async ({ data, metadata }) => {
-              updateState({ connectionState: "decrypting", progress: 100 });
-
-              try {
-                const decryptedBlob = await decryptFile(
-                  data,
-                  cryptoKey.current!,
-                  metadata,
-                );
-                downloadFile(decryptedBlob, metadata.name);
-                updateState({ connectionState: "complete" });
-              } catch (error) {
-                console.error("Decryption error:", error);
-                updateState({
-                  connectionState: "error",
-                  error: "Failed to decrypt file",
-                });
-              }
-            })
-            .catch((error) => {
-              console.error("Receive error:", error);
-              updateState({
-                connectionState: "error",
-                error: "Failed to receive file",
-              });
-            });
-        };
-
-        signaling.on("offer", async (sdp) => {
-          try {
-            await peerConnection.current!.setRemoteDescription(sdp);
-            const answer = await peerConnection.current!.createAnswer();
-            await peerConnection.current!.setLocalDescription(answer);
-            signaling.sendAnswer(answer);
-          } catch (error) {
-            console.error("Answer error:", error);
-            updateState({
-              connectionState: "error",
-              error: "Connection failed",
-            });
-          }
-        });
-
-        signaling.on("ice-candidate", async (candidate) => {
-          try {
-            await peerConnection.current!.addIceCandidate(candidate);
-          } catch (error) {
-            console.error("ICE error:", error);
-          }
-        });
-
-        signaling.on("peer-disconnected", () => {
-          if (state.connectionState !== "complete") {
-            updateState({
-              connectionState: "error",
-              error: "Sender disconnected",
-            });
-          }
-        });
-
-        signaling.on("error", (message) => {
-          updateState({ connectionState: "error", error: message });
-        });
-      } catch (error) {
-        console.error("Setup error:", error);
-        updateState({
-          connectionState: "error",
-          error: error instanceof Error ? error.message : "Connection failed",
-        });
-      }
-    };
-
-    start();
-
-    return () => {
-      peerConnection.current?.close();
-      signaling.disconnect();
-    };
-  }, [roomId, encryptionKey, downloadFile, state.connectionState]);
+  const handlePasswordSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    decryptWithPassword(password);
+  };
 
   return (
     <div className="w-full">
+      {/* Awaiting Password */}
+      {state.connectionState === "awaiting-password" && (
+        <div className="py-8">
+          <div className="w-16 h-16 rounded-2xl bg-orange-100 flex items-center justify-center mx-auto mb-6">
+            <Lock className="w-8 h-8 text-orange-600" />
+          </div>
+          <h3 className="text-xl font-bold text-center text-gray-900 mb-2">
+            Password Protected
+          </h3>
+          <p className="text-gray-500 text-center text-sm mb-8">
+            This file is encrypted with a password. Enter it below to decrypt
+            and download.
+          </p>
+          <form onSubmit={handlePasswordSubmit} className="max-w-xs mx-auto">
+            <input
+              type="password"
+              placeholder="Enter password..."
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-orange-100 focus:border-orange-300 transition-all mb-4"
+              autoFocus
+            />
+            <button
+              type="submit"
+              className="w-full py-3 bg-orange-500 text-white font-bold rounded-xl hover:bg-orange-600 transition-colors shadow-lg shadow-orange-500/20"
+            >
+              Decrypt File
+            </button>
+          </form>
+        </div>
+      )}
+
       {/* Connecting State */}
       {state.connectionState === "connecting" && (
         <div className="text-center py-8">
