@@ -9,7 +9,6 @@ import {
   deriveKeyFromPassword,
   generateSalt,
   arrayBufferToBase64Url,
-  type FileMetadata,
 } from "@/lib/crypto";
 import {
   createPeerConnection,
@@ -17,35 +16,21 @@ import {
   sendFile,
   generateFileId,
   DEFAULT_ICE_SERVERS,
-} from "@/lib/peer";
+} from "@/lib/webrtc";
+import type { FileMetadata } from "@/lib/webrtc";
+import type {
+  UploaderConnectionState,
+  TransferHistory,
+  FileUploaderState,
+} from "@/lib/transfer";
 import { signaling } from "@/lib/signaling";
 
-export type ConnectionState =
-  | "idle"
-  | "creating"
-  | "waiting"
-  | "connecting"
-  | "transferring"
-  | "ready" // Connection established, ready for more files
-  | "complete" // Legacy: single transfer complete (deprecated)
-  | "error";
-
-export interface TransferHistory {
-  fileId: string;
-  fileName: string;
-  fileSize: number;
-  completedAt: Date;
-}
-
-export interface FileUploaderState {
-  file: File | null;
-  shareUrl: string | null;
-  connectionState: ConnectionState;
-  progress: number;
-  error: string | null;
-  transferHistory: TransferHistory[];
-  isConnected: boolean;
-}
+// Re-export types for consumers
+export type {
+  UploaderConnectionState as ConnectionState,
+  TransferHistory,
+  FileUploaderState,
+};
 
 export function useFileUploader() {
   const [state, setState] = useState<FileUploaderState>({
@@ -95,23 +80,20 @@ export function useFileUploader() {
       });
 
       try {
-        // Encrypt the file with the same key
         const { encrypted, metadata } = await encryptFile(
           file,
           encryptionKey.current,
-          (p) => updateState({ progress: p * 0.5 }), // 0-50% for encryption
+          (p) => updateState({ progress: p * 0.5 }),
         );
 
-        // Send the file
         await sendFile(
           dataChannel.current!,
           encrypted,
           metadata,
-          (progress) => updateState({ progress: 50 + progress * 0.5 }), // 50-100% for transfer
+          (progress) => updateState({ progress: 50 + progress * 0.5 }),
           fileId,
         );
 
-        // Add to history
         setState((prev) => ({
           ...prev,
           connectionState: "ready",
@@ -205,7 +187,6 @@ export function useFileUploader() {
             fileId,
           );
 
-          // Instead of "complete", go to "ready" state for multi-file support
           setState((prev) => ({
             ...prev,
             connectionState: "ready",
@@ -239,7 +220,6 @@ export function useFileUploader() {
 
   const handleFileSelect = useCallback(
     async (file: File, password?: string) => {
-      // If already connected, send additional file
       if (state.isConnected && dataChannel.current?.readyState === "open") {
         return sendAdditionalFile(file);
       }
@@ -279,7 +259,6 @@ export function useFileUploader() {
           },
         );
 
-        // Add password info to metadata
         if (password && salt) {
           metadata.isPasswordProtected = true;
           metadata.salt = arrayBufferToBase64Url(salt.buffer as ArrayBuffer);

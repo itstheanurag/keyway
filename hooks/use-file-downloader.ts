@@ -7,51 +7,30 @@ import {
   encryptFile,
   deriveKeyFromPassword,
   base64UrlToArrayBuffer,
-  type FileMetadata,
 } from "@/lib/crypto";
 import {
   createPeerConnection,
-  createDataChannel,
   receiveFileStreaming,
   sendFile,
   supportsFileSystemAccess,
   openFileSaveStream,
   generateFileId,
   DEFAULT_ICE_SERVERS,
-} from "@/lib/peer";
+} from "@/lib/webrtc";
+import type { FileMetadata } from "@/lib/webrtc";
+import type {
+  DownloaderConnectionState,
+  TransferRecord,
+  DownloaderState,
+} from "@/lib/transfer";
 import { signaling } from "@/lib/signaling";
 
-export type ConnectionState =
-  | "awaiting-password"
-  | "connecting"
-  | "waiting-for-metadata"
-  | "choosing-save-location"
-  | "receiving"
-  | "decrypting"
-  | "ready" // Ready for bidirectional transfer
-  | "sending" // Sending a file back
-  | "complete"
-  | "error";
-
-export interface TransferRecord {
-  fileId: string;
-  fileName: string;
-  fileSize: number;
-  direction: "received" | "sent";
-  completedAt: Date;
-}
-
-export interface DownloaderState {
-  connectionState: ConnectionState;
-  progress: number;
-  error: string | null;
-  fileName: string | null;
-  fileSize: number | null;
-  isPasswordProtected: boolean;
-  supportsStreaming: boolean;
-  isConnected: boolean;
-  transferHistory: TransferRecord[];
-}
+// Re-export types for consumers
+export type {
+  DownloaderConnectionState as ConnectionState,
+  TransferRecord,
+  DownloaderState,
+};
 
 export function useFileDownloader(roomId: string, encryptionKey: string) {
   const isPasswordProtected = encryptionKey.startsWith("p_");
@@ -75,7 +54,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
   const cryptoKey = useRef<CryptoKey | null>(null);
   const salt = useRef<Uint8Array | null>(null);
   const hasStarted = useRef(false);
-  const connectionStateRef = useRef<ConnectionState>(
+  const connectionStateRef = useRef<DownloaderConnectionState>(
     isPasswordProtected ? "awaiting-password" : "connecting",
   );
   const pendingChannel = useRef<RTCDataChannel | null>(null);
@@ -139,23 +118,18 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
       });
 
       try {
-        // Encrypt with the same key
-        const { encrypted, metadata } = await encryptFile(
-          file,
-          key,
-          (p) => updateState({ progress: p * 0.5 }), // 0-50% for encryption
+        const { encrypted, metadata } = await encryptFile(file, key, (p) =>
+          updateState({ progress: p * 0.5 }),
         );
 
-        // Send the file
         await sendFile(
           channel,
           encrypted,
           metadata,
-          (progress) => updateState({ progress: 50 + progress * 0.5 }), // 50-100% for transfer
+          (progress) => updateState({ progress: 50 + progress * 0.5 }),
           fileId,
         );
 
-        // Add to history and go to ready state
         setState((prev) => ({
           ...prev,
           connectionState: "ready",
@@ -166,7 +140,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
               fileId,
               fileName: file.name,
               fileSize: file.size,
-              direction: "sent",
+              direction: "sent" as const,
               completedAt: new Date(),
             },
           ],
@@ -181,7 +155,6 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
 
   /**
    * Called after user chooses save location (streaming mode only)
-   * Starts receiving file data and writing directly to disk
    */
   const startStreamingReceive = useCallback(async () => {
     const channel = pendingChannel.current;
@@ -208,13 +181,12 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         channel,
         writable,
         (progress) => updateState({ progress }),
-        () => {}, // Metadata already received
+        () => {},
       );
 
       if (streamed && fileStream.current) {
         await fileStream.current.close();
 
-        // Add to history and go to ready state for bidirectional
         setState((prev) => ({
           ...prev,
           connectionState: "ready",
@@ -226,7 +198,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
               fileId: generateFileId(),
               fileName: receivedMetadata.name,
               fileSize: receivedMetadata.size,
-              direction: "received",
+              direction: "received" as const,
               completedAt: new Date(),
             },
           ],
@@ -237,7 +209,6 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         const decryptedBlob = await decryptFile(data, key, receivedMetadata);
         downloadFile(decryptedBlob, receivedMetadata.name);
 
-        // Add to history and go to ready state for bidirectional
         setState((prev) => ({
           ...prev,
           connectionState: "ready",
@@ -248,14 +219,13 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
               fileId: generateFileId(),
               fileName: receivedMetadata.name,
               fileSize: receivedMetadata.size,
-              direction: "received",
+              direction: "received" as const,
               completedAt: new Date(),
             },
           ],
         }));
       }
 
-      // Store channel for bidirectional use
       dataChannel.current = channel;
     } catch (error) {
       console.error("Receive error:", error);
@@ -276,7 +246,6 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
       return;
     }
 
-    // Try to open file picker
     const stream = await openFileSaveStream(metadata.name, metadata.mimeType);
     if (stream) {
       fileStream.current = stream;
@@ -325,7 +294,6 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
 
         updateState({ connectionState: "waiting-for-metadata" });
 
-        // Set up to receive metadata first
         channel.binaryType = "arraybuffer";
 
         const handleMetadata = (e: MessageEvent) => {
@@ -339,14 +307,11 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
                   fileSize: msg.size,
                 });
 
-                // Remove this listener
                 channel.removeEventListener("message", handleMetadata);
 
                 if (streamsSupported) {
-                  // Ask user where to save
                   updateState({ connectionState: "choosing-save-location" });
                 } else {
-                  // Auto-proceed with memory buffering
                   proceedWithFallback();
                 }
               }
@@ -415,14 +380,11 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
     const init = async () => {
       try {
         if (isPasswordProtected) {
-          // Parse salt and wait for password
           const saltStr = encryptionKey.substring(2);
           salt.current = new Uint8Array(base64UrlToArrayBuffer(saltStr));
-          // Don't connect yet - wait for user to enter password
           return;
         }
 
-        // Non-password protected: import key and connect immediately
         cryptoKey.current = await importKey(encryptionKey);
         await startConnection();
       } catch (error) {
@@ -457,9 +419,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
       }
 
       try {
-        // Derive the key from password
         cryptoKey.current = await deriveKeyFromPassword(password, salt.current);
-        // Now connect and receive the file
         await startConnection();
       } catch (error) {
         console.error("Password error:", error);
