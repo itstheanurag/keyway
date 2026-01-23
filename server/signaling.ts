@@ -1,5 +1,5 @@
 import { Server as SocketIOServer, Socket } from "socket.io";
-import { createServer } from "http";
+import { createServer, Server as HttpServer } from "http";
 
 interface Room {
   sender: string | null;
@@ -10,16 +10,11 @@ interface Room {
 const rooms = new Map<string, Room>();
 const ROOM_TIMEOUT = 10 * 60 * 1000; // 10 minutes
 
-export function createSignalingServer(port: number = 3001) {
-  const httpServer = createServer();
-  const io = new SocketIOServer(httpServer, {
-    cors: {
-      origin: process.env.NEXT_PUBLIC_URL || "http://localhost:3000",
-      methods: ["GET", "POST"],
-    },
-    path: "/api/socketio",
-  });
-
+/**
+ * Attach signaling handlers to a Socket.io server instance
+ * This can be used with any http server (standalone or Next.js custom server)
+ */
+export function setupSignaling(io: SocketIOServer): void {
   // Cleanup expired rooms periodically
   setInterval(() => {
     const now = Date.now();
@@ -124,6 +119,22 @@ export function createSignalingServer(port: number = 3001) {
       console.log(`Client disconnected: ${socket.id}`);
     });
   });
+}
+
+/**
+ * Create a standalone signaling server (for development or separate deployment)
+ */
+export function createSignalingServer(port: number = 3001) {
+  const httpServer = createServer();
+  const io = new SocketIOServer(httpServer, {
+    cors: {
+      origin: process.env.NEXT_PUBLIC_URL || "http://localhost:3000",
+      methods: ["GET", "POST"],
+    },
+    path: "/api/socketio",
+  });
+
+  setupSignaling(io);
 
   httpServer.listen(port, () => {
     console.log(`Signaling server running on port ${port}`);

@@ -21,11 +21,15 @@ class SignalingClient {
 
   connect(serverUrl?: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      // Connect to signaling server (port 3001 in dev, configurable via env)
+      // Connect to signaling server
+      // In production: same origin (integrated server)
+      // In development: can use separate server via env var
       const url =
         serverUrl ||
         process.env.NEXT_PUBLIC_SIGNALING_URL ||
-        "http://localhost:3001";
+        (typeof window !== "undefined"
+          ? window.location.origin
+          : "http://localhost:3001");
 
       this.socket = io(url, {
         path: "/api/socketio",
