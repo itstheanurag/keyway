@@ -4,35 +4,38 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   importKey,
   decryptFile,
+  encryptFile,
   deriveKeyFromPassword,
   base64UrlToArrayBuffer,
 } from "@/lib/crypto";
 import {
   createPeerConnection,
-  receiveFile,
+  receiveFileStreaming,
+  sendFile,
+  supportsFileSystemAccess,
+  openFileSaveStream,
+  generateFileId,
   DEFAULT_ICE_SERVERS,
-} from "@/lib/peer";
+} from "@/lib/webrtc";
+import type { FileMetadata } from "@/lib/webrtc";
+import type {
+  DownloaderConnectionState,
+  TransferRecord,
+  DownloaderState,
+} from "@/lib/transfer";
 import { signaling } from "@/lib/signaling";
 
-export type ConnectionState =
-  | "awaiting-password"
-  | "connecting"
-  | "receiving"
-  | "decrypting"
-  | "complete"
-  | "error";
-
-export interface DownloaderState {
-  connectionState: ConnectionState;
-  progress: number;
-  error: string | null;
-  fileName: string | null;
-  fileSize: number | null;
-  isPasswordProtected: boolean;
-}
+// Re-export types for consumers
+export type {
+  DownloaderConnectionState as ConnectionState,
+  TransferRecord,
+  DownloaderState,
+};
 
 export function useFileDownloader(roomId: string, encryptionKey: string) {
   const isPasswordProtected = encryptionKey.startsWith("p_");
+  const streamsSupported =
+    typeof window !== "undefined" && supportsFileSystemAccess();
 
   const [state, setState] = useState<DownloaderState>({
     connectionState: isPasswordProtected ? "awaiting-password" : "connecting",
@@ -41,18 +44,27 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
     fileName: null,
     fileSize: null,
     isPasswordProtected,
+    supportsStreaming: streamsSupported,
+    isConnected: false,
+    transferHistory: [],
   });
 
   const peerConnection = useRef<RTCPeerConnection | null>(null);
+  const dataChannel = useRef<RTCDataChannel | null>(null);
   const cryptoKey = useRef<CryptoKey | null>(null);
-  const receivedData = useRef<{ data: ArrayBuffer; metadata: any } | null>(
-    null,
-  );
   const salt = useRef<Uint8Array | null>(null);
   const hasStarted = useRef(false);
-  const connectionStateRef = useRef<ConnectionState>(
+  const connectionStateRef = useRef<DownloaderConnectionState>(
     isPasswordProtected ? "awaiting-password" : "connecting",
   );
+  const pendingChannel = useRef<RTCDataChannel | null>(null);
+  const pendingMetadata = useRef<
+    (FileMetadata & { encryptedSize: number }) | null
+  >(null);
+  const fileStream = useRef<{
+    writable: FileSystemWritableFileStream;
+    close: () => Promise<void>;
+  } | null>(null);
 
   const updateState = useCallback((updates: Partial<DownloaderState>) => {
     setState((prev) => {
@@ -75,27 +87,180 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
     URL.revokeObjectURL(url);
   }, []);
 
-  const proceedWithDecryption = useCallback(async () => {
-    if (!receivedData.current || !cryptoKey.current) return;
+  /**
+   * Send a file back to the sender (bidirectional transfer)
+   */
+  const sendFileBack = useCallback(
+    async (file: File) => {
+      const channel = dataChannel.current || pendingChannel.current;
+      const key = cryptoKey.current;
 
-    updateState({ connectionState: "decrypting", progress: 100 });
-    try {
-      const { data, metadata } = receivedData.current;
-      const decryptedBlob = await decryptFile(
-        data,
-        cryptoKey.current,
-        metadata,
-      );
-      downloadFile(decryptedBlob, metadata.name);
-      updateState({ connectionState: "complete" });
-    } catch (error) {
-      console.error("Decryption error:", error);
+      if (!channel || channel.readyState !== "open") {
+        updateState({
+          error: "Connection not ready",
+          connectionState: "error",
+        });
+        return;
+      }
+
+      if (!key) {
+        updateState({ error: "No encryption key", connectionState: "error" });
+        return;
+      }
+
+      const fileId = generateFileId();
+      updateState({
+        connectionState: "sending",
+        progress: 0,
+        error: null,
+        fileName: file.name,
+        fileSize: file.size,
+      });
+
+      try {
+        const { encrypted, metadata } = await encryptFile(file, key, (p) =>
+          updateState({ progress: p * 0.5 }),
+        );
+
+        await sendFile(
+          channel,
+          encrypted,
+          metadata,
+          (progress) => updateState({ progress: 50 + progress * 0.5 }),
+          fileId,
+        );
+
+        setState((prev) => ({
+          ...prev,
+          connectionState: "ready",
+          progress: 100,
+          transferHistory: [
+            ...prev.transferHistory,
+            {
+              fileId,
+              fileName: file.name,
+              fileSize: file.size,
+              direction: "sent" as const,
+              completedAt: new Date(),
+            },
+          ],
+        }));
+      } catch (error) {
+        console.error("Send error:", error);
+        updateState({ connectionState: "error", error: "Failed to send file" });
+      }
+    },
+    [updateState],
+  );
+
+  /**
+   * Called after user chooses save location (streaming mode only)
+   */
+  const startStreamingReceive = useCallback(async () => {
+    const channel = pendingChannel.current;
+    const metadata = pendingMetadata.current;
+    const writable = fileStream.current?.writable ?? null;
+    const key = cryptoKey.current;
+
+    if (!channel || !metadata || !key) {
       updateState({
         connectionState: "error",
-        error: "Incorrect password or corrupted file",
+        error: "Missing data for streaming",
+      });
+      return;
+    }
+
+    updateState({ connectionState: "receiving", progress: 0 });
+
+    try {
+      const {
+        data,
+        metadata: receivedMetadata,
+        streamed,
+      } = await receiveFileStreaming(
+        channel,
+        writable,
+        (progress) => updateState({ progress }),
+        () => {},
+      );
+
+      if (streamed && fileStream.current) {
+        await fileStream.current.close();
+
+        setState((prev) => ({
+          ...prev,
+          connectionState: "ready",
+          progress: 100,
+          isConnected: true,
+          transferHistory: [
+            ...prev.transferHistory,
+            {
+              fileId: generateFileId(),
+              fileName: receivedMetadata.name,
+              fileSize: receivedMetadata.size,
+              direction: "received" as const,
+              completedAt: new Date(),
+            },
+          ],
+        }));
+      } else if (data) {
+        updateState({ connectionState: "decrypting", progress: 100 });
+
+        const decryptedBlob = await decryptFile(data, key, receivedMetadata);
+        downloadFile(decryptedBlob, receivedMetadata.name);
+
+        setState((prev) => ({
+          ...prev,
+          connectionState: "ready",
+          isConnected: true,
+          transferHistory: [
+            ...prev.transferHistory,
+            {
+              fileId: generateFileId(),
+              fileName: receivedMetadata.name,
+              fileSize: receivedMetadata.size,
+              direction: "received" as const,
+              completedAt: new Date(),
+            },
+          ],
+        }));
+      }
+
+      dataChannel.current = channel;
+    } catch (error) {
+      console.error("Receive error:", error);
+      updateState({
+        connectionState: "error",
+        error: "Failed to receive file",
       });
     }
   }, [downloadFile, updateState]);
+
+  /**
+   * User picked a save location - proceed with receiving
+   */
+  const proceedWithSaveLocation = useCallback(async () => {
+    const metadata = pendingMetadata.current;
+    if (!metadata) {
+      updateState({ connectionState: "error", error: "No metadata" });
+      return;
+    }
+
+    const stream = await openFileSaveStream(metadata.name, metadata.mimeType);
+    if (stream) {
+      fileStream.current = stream;
+    }
+
+    await startStreamingReceive();
+  }, [startStreamingReceive, updateState]);
+
+  /**
+   * User chose to download without picking location (fallback mode)
+   */
+  const proceedWithFallback = useCallback(async () => {
+    fileStream.current = null;
+    await startStreamingReceive();
+  }, [startStreamingReceive]);
 
   const startConnection = useCallback(async () => {
     try {
@@ -113,27 +278,50 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         }
       };
 
+      peerConnection.current.onconnectionstatechange = () => {
+        const connState = peerConnection.current?.connectionState;
+        if (connState === "connected") {
+          updateState({ isConnected: true });
+        } else if (connState === "disconnected" || connState === "failed") {
+          updateState({ isConnected: false });
+        }
+      };
+
       peerConnection.current.ondatachannel = (event) => {
         const channel = event.channel;
-        updateState({ connectionState: "receiving" });
+        pendingChannel.current = channel;
+        dataChannel.current = channel;
 
-        receiveFile(
-          channel,
-          (progress) => updateState({ progress }),
-          (metadata) =>
-            updateState({ fileName: metadata.name, fileSize: metadata.size }),
-        )
-          .then(async ({ data, metadata }) => {
-            receivedData.current = { data, metadata };
-            await proceedWithDecryption();
-          })
-          .catch((error) => {
-            console.error("Receive error:", error);
-            updateState({
-              connectionState: "error",
-              error: "Failed to receive file",
-            });
-          });
+        updateState({ connectionState: "waiting-for-metadata" });
+
+        channel.binaryType = "arraybuffer";
+
+        const handleMetadata = (e: MessageEvent) => {
+          if (typeof e.data === "string") {
+            try {
+              const msg = JSON.parse(e.data);
+              if (msg.type === "metadata") {
+                pendingMetadata.current = msg;
+                updateState({
+                  fileName: msg.name,
+                  fileSize: msg.size,
+                });
+
+                channel.removeEventListener("message", handleMetadata);
+
+                if (streamsSupported) {
+                  updateState({ connectionState: "choosing-save-location" });
+                } else {
+                  proceedWithFallback();
+                }
+              }
+            } catch {
+              // Ignore parse errors
+            }
+          }
+        };
+
+        channel.addEventListener("message", handleMetadata);
       };
 
       signaling.on("offer", async (sdp) => {
@@ -160,11 +348,16 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
       });
 
       signaling.on("peer-disconnected", () => {
-        if (connectionStateRef.current !== "complete") {
+        if (
+          connectionStateRef.current !== "complete" &&
+          connectionStateRef.current !== "ready"
+        ) {
           updateState({
             connectionState: "error",
             error: "Sender disconnected",
           });
+        } else {
+          updateState({ isConnected: false });
         }
       });
 
@@ -178,7 +371,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         error: error instanceof Error ? error.message : "Connection failed",
       });
     }
-  }, [roomId, updateState, proceedWithDecryption]);
+  }, [roomId, updateState, streamsSupported, proceedWithFallback]);
 
   useEffect(() => {
     if (hasStarted.current) return;
@@ -187,14 +380,11 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
     const init = async () => {
       try {
         if (isPasswordProtected) {
-          // Parse salt and wait for password
           const saltStr = encryptionKey.substring(2);
           salt.current = new Uint8Array(base64UrlToArrayBuffer(saltStr));
-          // Don't connect yet - wait for user to enter password
           return;
         }
 
-        // Non-password protected: import key and connect immediately
         cryptoKey.current = await importKey(encryptionKey);
         await startConnection();
       } catch (error) {
@@ -229,9 +419,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
       }
 
       try {
-        // Derive the key from password
         cryptoKey.current = await deriveKeyFromPassword(password, salt.current);
-        // Now connect and receive the file
         await startConnection();
       } catch (error) {
         console.error("Password error:", error);
@@ -244,5 +432,11 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
     [startConnection, updateState],
   );
 
-  return { state, decryptWithPassword };
+  return {
+    state,
+    decryptWithPassword,
+    proceedWithSaveLocation,
+    proceedWithFallback,
+    sendFileBack,
+  };
 }
