@@ -11,9 +11,14 @@ import {
 import {
   createPeerConnection,
   receiveFileStreaming,
+  receiveNextFile,
   sendFile,
   supportsFileSystemAccess,
+  supportsDirectoryPicker,
   openFileSaveStream,
+  openDirectoryPicker,
+  saveFileToDirectory,
+  flattenPathForDownload,
   generateFileId,
   DEFAULT_ICE_SERVERS,
 } from "@/lib/webrtc";
@@ -22,10 +27,10 @@ import type {
   DownloaderConnectionState,
   TransferRecord,
   DownloaderState,
+  FolderShareInfo,
 } from "@/lib/transfer";
 import { signaling } from "@/lib/signaling";
 
-// Re-export types for consumers
 export type {
   DownloaderConnectionState as ConnectionState,
   TransferRecord,
@@ -36,6 +41,8 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
   const isPasswordProtected = encryptionKey.startsWith("p_");
   const streamsSupported =
     typeof window !== "undefined" && supportsFileSystemAccess();
+  const directoryPickerSupported =
+    typeof window !== "undefined" && supportsDirectoryPicker();
 
   const [state, setState] = useState<DownloaderState>({
     connectionState: isPasswordProtected ? "awaiting-password" : "connecting",
@@ -43,8 +50,11 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
     error: null,
     fileName: null,
     fileSize: null,
+    folder: null,
+    folderProgress: null,
     isPasswordProtected,
     supportsStreaming: streamsSupported,
+    supportsDirectoryPicker: directoryPickerSupported,
     isConnected: false,
     transferHistory: [],
   });
@@ -61,10 +71,14 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
   const pendingMetadata = useRef<
     (FileMetadata & { encryptedSize: number }) | null
   >(null);
+  const pendingFolderRef = useRef<FolderShareInfo | null>(null);
+  const directoryHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
   const fileStream = useRef<{
     writable: FileSystemWritableFileStream;
     close: () => Promise<void>;
   } | null>(null);
+  const isSendingRef = useRef(false);
+  const listeningForMore = useRef(false);
 
   const updateState = useCallback((updates: Partial<DownloaderState>) => {
     setState((prev) => {
@@ -87,9 +101,172 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
     URL.revokeObjectURL(url);
   }, []);
 
-  /**
-   * Send a file back to the sender (bidirectional transfer)
-   */
+  const saveReceivedFile = useCallback(
+    async (blob: Blob, metadata: FileMetadata) => {
+      if (directoryHandleRef.current && metadata.relativePath) {
+        await saveFileToDirectory(
+          directoryHandleRef.current,
+          metadata.relativePath,
+          blob,
+        );
+        return;
+      }
+
+      const downloadName = metadata.relativePath
+        ? flattenPathForDownload(metadata.relativePath)
+        : metadata.name;
+      downloadFile(blob, downloadName);
+    },
+    [downloadFile],
+  );
+
+  const receiveFolderBatch = useCallback(
+    async (channel: RTCDataChannel, key: CryptoKey) => {
+      const folderInfo = pendingFolderRef.current;
+      const totalFiles = folderInfo?.fileCount ?? 0;
+      let received = 0;
+
+      updateState({
+        connectionState: "receiving-folder",
+        progress: 0,
+        folderProgress: { received: 0, total: totalFiles },
+      });
+
+      while (channel.readyState === "open") {
+        if (totalFiles > 0 && received >= totalFiles) break;
+
+        try {
+          const { data, metadata } = await receiveNextFile(channel, {
+            shouldAccept: () => !isSendingRef.current,
+            onMetadata: (meta) => {
+              updateState({
+                fileName: meta.relativePath || meta.name,
+                fileSize: meta.size,
+                progress: 0,
+              });
+            },
+            onProgress: (progress) => updateState({ progress }),
+          });
+
+          updateState({ connectionState: "decrypting" });
+
+          const decryptedBlob = await decryptFile(data, key, metadata);
+          await saveReceivedFile(decryptedBlob, metadata);
+
+          received++;
+          setState((prev) => ({
+            ...prev,
+            connectionState: "receiving-folder",
+            progress: totalFiles
+              ? Math.round((received / totalFiles) * 100)
+              : 100,
+            folderProgress: { received, total: totalFiles || received },
+            transferHistory: [
+              ...prev.transferHistory,
+              {
+                fileId: generateFileId(),
+                fileName: metadata.relativePath || metadata.name,
+                fileSize: metadata.size,
+                direction: "received" as const,
+                completedAt: new Date(),
+              },
+            ],
+          }));
+        } catch (error) {
+          if (channel.readyState !== "open") break;
+          console.error("Folder receive error:", error);
+          updateState({
+            connectionState: "error",
+            error: "Failed to receive folder",
+          });
+          return;
+        }
+      }
+
+      pendingFolderRef.current = null;
+      directoryHandleRef.current = null;
+
+      setState((prev) => ({
+        ...prev,
+        connectionState: "ready",
+        progress: 100,
+        isConnected: true,
+        folder: null,
+        folderProgress: null,
+      }));
+    },
+    [saveReceivedFile, updateState],
+  );
+
+  const startListeningForMoreFiles = useCallback(() => {
+    const channel = dataChannel.current || pendingChannel.current;
+    const key = cryptoKey.current;
+
+    if (!channel || channel.readyState !== "open" || !key) return;
+    if (listeningForMore.current) return;
+
+    listeningForMore.current = true;
+    channel.onmessage = null;
+
+    const listen = async () => {
+      while (
+        channel.readyState === "open" &&
+        listeningForMore.current &&
+        !isSendingRef.current
+      ) {
+        try {
+          updateState({
+            connectionState: "waiting-for-metadata",
+            progress: 0,
+            error: null,
+          });
+
+          const { data, metadata } = await receiveNextFile(channel, {
+            shouldAccept: () => !isSendingRef.current,
+            onMetadata: (meta) => {
+              updateState({
+                connectionState: "receiving",
+                fileName: meta.relativePath || meta.name,
+                fileSize: meta.size,
+                progress: 0,
+              });
+            },
+            onProgress: (progress) => updateState({ progress }),
+          });
+
+          updateState({ connectionState: "decrypting", progress: 100 });
+
+          const decryptedBlob = await decryptFile(data, key, metadata);
+          await saveReceivedFile(decryptedBlob, metadata);
+
+          setState((prev) => ({
+            ...prev,
+            connectionState: "ready",
+            progress: 100,
+            isConnected: true,
+            transferHistory: [
+              ...prev.transferHistory,
+              {
+                fileId: generateFileId(),
+                fileName: metadata.relativePath || metadata.name,
+                fileSize: metadata.size,
+                direction: "received" as const,
+                completedAt: new Date(),
+              },
+            ],
+          }));
+        } catch (error) {
+          if (channel.readyState !== "open") break;
+          console.error("Additional file receive error:", error);
+          break;
+        }
+      }
+      listeningForMore.current = false;
+    };
+
+    listen();
+  }, [saveReceivedFile, updateState]);
+
   const sendFileBack = useCallback(
     async (file: File) => {
       const channel = dataChannel.current || pendingChannel.current;
@@ -109,6 +286,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
       }
 
       const fileId = generateFileId();
+      isSendingRef.current = true;
       updateState({
         connectionState: "sending",
         progress: 0,
@@ -148,14 +326,14 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
       } catch (error) {
         console.error("Send error:", error);
         updateState({ connectionState: "error", error: "Failed to send file" });
+      } finally {
+        isSendingRef.current = false;
+        startListeningForMoreFiles();
       }
     },
-    [updateState],
+    [updateState, startListeningForMoreFiles],
   );
 
-  /**
-   * Called after user chooses save location (streaming mode only)
-   */
   const startStreamingReceive = useCallback(async () => {
     const channel = pendingChannel.current;
     const metadata = pendingMetadata.current;
@@ -207,7 +385,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         updateState({ connectionState: "decrypting", progress: 100 });
 
         const decryptedBlob = await decryptFile(data, key, receivedMetadata);
-        downloadFile(decryptedBlob, receivedMetadata.name);
+        await saveReceivedFile(decryptedBlob, receivedMetadata);
 
         setState((prev) => ({
           ...prev,
@@ -227,6 +405,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
       }
 
       dataChannel.current = channel;
+      startListeningForMoreFiles();
     } catch (error) {
       console.error("Receive error:", error);
       updateState({
@@ -234,11 +413,8 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         error: "Failed to receive file",
       });
     }
-  }, [downloadFile, updateState]);
+  }, [saveReceivedFile, updateState, startListeningForMoreFiles]);
 
-  /**
-   * User picked a save location - proceed with receiving
-   */
   const proceedWithSaveLocation = useCallback(async () => {
     const metadata = pendingMetadata.current;
     if (!metadata) {
@@ -254,13 +430,48 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
     await startStreamingReceive();
   }, [startStreamingReceive, updateState]);
 
-  /**
-   * User chose to download without picking location (fallback mode)
-   */
   const proceedWithFallback = useCallback(async () => {
     fileStream.current = null;
     await startStreamingReceive();
   }, [startStreamingReceive]);
+
+  const beginFolderReceive = useCallback(
+    async (useDirectoryPicker: boolean) => {
+      const channel = pendingChannel.current;
+      const key = cryptoKey.current;
+
+      if (!channel || !key || !pendingFolderRef.current) {
+        updateState({ connectionState: "error", error: "No folder to receive" });
+        return;
+      }
+
+      directoryHandleRef.current = null;
+
+      if (useDirectoryPicker && directoryPickerSupported) {
+        const dirHandle = await openDirectoryPicker();
+        if (!dirHandle) return;
+        directoryHandleRef.current = dirHandle;
+      }
+
+      dataChannel.current = channel;
+      await receiveFolderBatch(channel, key);
+      startListeningForMoreFiles();
+    },
+    [
+      directoryPickerSupported,
+      receiveFolderBatch,
+      startListeningForMoreFiles,
+      updateState,
+    ],
+  );
+
+  const proceedWithSaveFolder = useCallback(async () => {
+    await beginFolderReceive(true);
+  }, [beginFolderReceive]);
+
+  const proceedWithFolderFallback = useCallback(async () => {
+    await beginFolderReceive(false);
+  }, [beginFolderReceive]);
 
   const startConnection = useCallback(async () => {
     try {
@@ -293,35 +504,56 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         dataChannel.current = channel;
 
         updateState({ connectionState: "waiting-for-metadata" });
-
         channel.binaryType = "arraybuffer";
 
-        const handleMetadata = (e: MessageEvent) => {
-          if (typeof e.data === "string") {
-            try {
-              const msg = JSON.parse(e.data);
-              if (msg.type === "metadata") {
-                pendingMetadata.current = msg;
-                updateState({
-                  fileName: msg.name,
-                  fileSize: msg.size,
-                });
+        const handleInitialMessage = (e: MessageEvent) => {
+          if (typeof e.data !== "string") return;
 
-                channel.removeEventListener("message", handleMetadata);
+          try {
+            const msg = JSON.parse(e.data);
 
-                if (streamsSupported) {
-                  updateState({ connectionState: "choosing-save-location" });
-                } else {
-                  proceedWithFallback();
-                }
+            if (msg.type === "folder-start") {
+              pendingFolderRef.current = {
+                name: msg.folderName,
+                fileCount: msg.fileCount,
+                totalSize: msg.totalSize,
+              };
+              channel.removeEventListener("message", handleInitialMessage);
+
+              updateState({
+                folder: pendingFolderRef.current,
+                connectionState: directoryPickerSupported
+                  ? "choosing-save-folder"
+                  : "receiving-folder",
+              });
+
+              if (!directoryPickerSupported) {
+                beginFolderReceive(false);
               }
-            } catch {
-              // Ignore parse errors
+              return;
             }
+
+            if (msg.type === "metadata") {
+              pendingMetadata.current = msg;
+              channel.removeEventListener("message", handleInitialMessage);
+
+              updateState({
+                fileName: msg.name,
+                fileSize: msg.size,
+              });
+
+              if (streamsSupported) {
+                updateState({ connectionState: "choosing-save-location" });
+              } else {
+                proceedWithFallback();
+              }
+            }
+          } catch {
+            // Ignore parse errors
           }
         };
 
-        channel.addEventListener("message", handleMetadata);
+        channel.addEventListener("message", handleInitialMessage);
       };
 
       signaling.on("offer", async (sdp) => {
@@ -371,7 +603,15 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         error: error instanceof Error ? error.message : "Connection failed",
       });
     }
-  }, [roomId, updateState, streamsSupported, proceedWithFallback]);
+  }, [
+    roomId,
+    updateState,
+    streamsSupported,
+    directoryPickerSupported,
+    proceedWithFallback,
+    beginFolderReceive,
+    startListeningForMoreFiles,
+  ]);
 
   useEffect(() => {
     if (hasStarted.current) return;
@@ -437,6 +677,8 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
     decryptWithPassword,
     proceedWithSaveLocation,
     proceedWithFallback,
+    proceedWithSaveFolder,
+    proceedWithFolderFallback,
     sendFileBack,
   };
 }
