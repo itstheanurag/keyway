@@ -117,6 +117,7 @@ export async function encryptFile(
   file: File,
   key: CryptoKey,
   onProgress?: (progress: number) => void,
+  relativePath?: string,
 ): Promise<{ encrypted: ArrayBuffer; metadata: FileMetadata }> {
   const arrayBuffer = await file.arrayBuffer();
   onProgress?.(50);
@@ -124,12 +125,15 @@ export async function encryptFile(
   const encrypted = await encryptData(arrayBuffer, key);
   onProgress?.(100);
 
+  const path = relativePath || file.webkitRelativePath;
+
   return {
     encrypted,
     metadata: {
       name: file.name,
       mimeType: file.type,
       size: file.size,
+      ...(path ? { relativePath: path } : {}),
     },
   };
 }
@@ -176,6 +180,7 @@ export interface FileMetadata {
   name: string;
   mimeType: string;
   size: number;
+  relativePath?: string;
   isPasswordProtected?: boolean;
   salt?: string; // base64url encoded salt
 }
