@@ -21,7 +21,9 @@ export type DownloaderConnectionState =
   | "connecting"
   | "waiting-for-metadata"
   | "choosing-save-location"
+  | "choosing-save-folder"
   | "receiving"
+  | "receiving-folder"
   | "decrypting"
   | "ready"
   | "sending"
@@ -52,8 +54,15 @@ export interface TransferRecord {
 /**
  * State for file uploader hook
  */
+export interface FolderShareInfo {
+  name: string;
+  fileCount: number;
+  totalSize: number;
+}
+
 export interface FileUploaderState {
   file: File | null;
+  folder: FolderShareInfo | null;
   shareUrl: string | null;
   connectionState: UploaderConnectionState;
   progress: number;
@@ -71,8 +80,11 @@ export interface DownloaderState {
   error: string | null;
   fileName: string | null;
   fileSize: number | null;
+  folder: FolderShareInfo | null;
+  folderProgress: { received: number; total: number } | null;
   isPasswordProtected: boolean;
   supportsStreaming: boolean;
+  supportsDirectoryPicker: boolean;
   isConnected: boolean;
   transferHistory: TransferRecord[];
 }

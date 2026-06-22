@@ -5,6 +5,7 @@ import {
   Lock,
   Download,
   FolderDown,
+  Folder,
   HardDrive,
   Plus,
   ArrowUpDown,
@@ -29,8 +30,21 @@ export default function FileDownloader({
     decryptWithPassword,
     proceedWithSaveLocation,
     proceedWithFallback,
+    proceedWithSaveFolder,
+    proceedWithFolderFallback,
     sendFileBack,
+    cancelTransfer,
   } = useFileDownloader(roomId, encryptionKey);
+
+  const cancelButton = (
+    <button
+      type="button"
+      onClick={cancelTransfer}
+      className="w-full py-2.5 text-sm font-medium text-red-600 border border-red-200 rounded-xl hover:bg-red-50 transition-colors"
+    >
+      Cancel transfer
+    </button>
+  );
   const [password, setPassword] = useState("");
   const sendFileInput = useRef<HTMLInputElement>(null);
 
@@ -134,6 +148,98 @@ export default function FileDownloader({
         </div>
       )}
 
+      {/* Choose Save Folder State */}
+      {state.connectionState === "choosing-save-folder" && state.folder && (
+        <div className="py-6">
+          <div className="flex items-center gap-4 mb-6">
+            <div className="w-14 h-14 rounded-xl bg-orange-100 flex items-center justify-center flex-shrink-0">
+              <Folder className="w-7 h-7 text-orange-600" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-[var(--foreground)] truncate">
+                {state.folder.name}
+              </p>
+              <p className="text-sm text-[var(--muted)]">
+                {state.folder.fileCount} files ·{" "}
+                {formatBytes(state.folder.totalSize)}
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {state.supportsDirectoryPicker && (
+              <button
+                onClick={proceedWithSaveFolder}
+                className="w-full py-3.5 bg-[var(--primary)] text-white font-medium rounded-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-[var(--primary)]/20"
+              >
+                <FolderDown className="w-5 h-5" />
+                Choose Save Folder
+              </button>
+            )}
+            <button
+              onClick={proceedWithFolderFallback}
+              className="w-full py-3 bg-[var(--border)] text-[var(--foreground)] font-medium rounded-xl hover:bg-[var(--border)]/80 transition-all flex items-center justify-center gap-2"
+            >
+              <Download className="w-5 h-5" />
+              {state.supportsDirectoryPicker
+                ? "Download Files Individually"
+                : "Start Download"}
+            </button>
+            <p className="text-xs text-center text-[var(--muted)]">
+              {state.supportsDirectoryPicker
+                ? "Pick a folder to preserve the directory structure, or download files individually"
+                : "Files will download individually with folder paths in their names"}
+            </p>
+            <div className="pt-1">{cancelButton}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Receiving Folder State */}
+      {state.connectionState === "receiving-folder" && (
+        <div className="py-4">
+          <div className="flex items-center gap-4 mb-6">
+            <div className="w-12 h-12 rounded-lg bg-orange-100 flex items-center justify-center flex-shrink-0">
+              <Folder className="w-6 h-6 text-orange-600" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-[var(--foreground)] truncate">
+                {state.folder?.name || "Receiving folder..."}
+              </p>
+              {state.folderProgress && (
+                <p className="text-sm text-[var(--muted)]">
+                  {state.folderProgress.received} of{" "}
+                  {state.folderProgress.total} files
+                </p>
+              )}
+              {state.fileName && (
+                <p className="text-xs text-[var(--muted)] truncate mt-1">
+                  {state.fileName}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-[var(--muted)]">Downloading folder...</span>
+              <span className="font-medium text-[var(--foreground)]">
+                {state.progress}%
+              </span>
+            </div>
+            <div className="w-full h-2 bg-[var(--border)] rounded-full overflow-hidden">
+              <motion.div
+                className="h-full bg-orange-500 rounded-full"
+                initial={{ width: 0 }}
+                animate={{ width: `${state.progress}%` }}
+                transition={{ type: "spring", stiffness: 50 }}
+              />
+            </div>
+            <div className="pt-2">{cancelButton}</div>
+          </div>
+        </div>
+      )}
+
       {/* Choose Save Location State */}
       {state.connectionState === "choosing-save-location" && (
         <div className="py-6">
@@ -172,6 +278,7 @@ export default function FileDownloader({
               Choose a location to stream directly to disk, or quick download to
               browser default
             </p>
+            <div className="pt-1">{cancelButton}</div>
           </div>
         </div>
       )}
@@ -210,6 +317,7 @@ export default function FileDownloader({
                 transition={{ type: "spring", stiffness: 50 }}
               />
             </div>
+            <div className="pt-2">{cancelButton}</div>
           </div>
         </div>
       )}
@@ -248,6 +356,7 @@ export default function FileDownloader({
                 transition={{ type: "spring", stiffness: 50 }}
               />
             </div>
+            <div className="pt-2">{cancelButton}</div>
           </div>
         </div>
       )}
@@ -276,6 +385,22 @@ export default function FileDownloader({
           <p className="text-sm text-[var(--muted)]">Almost done...</p>
         </div>
       )}
+
+      {/* Waiting for more files (connected session) */}
+      {state.connectionState === "waiting-for-metadata" &&
+        state.transferHistory.length > 0 && (
+          <div className="text-center py-6">
+            <div className="w-12 h-12 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-3">
+              <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse" />
+            </div>
+            <h3 className="font-medium text-[var(--foreground)] mb-1">
+              Connected
+            </h3>
+            <p className="text-sm text-[var(--muted)]">
+              Waiting for more files from sender...
+            </p>
+          </div>
+        )}
 
       {/* Ready State - Bidirectional Transfer UI */}
       {state.connectionState === "ready" && (

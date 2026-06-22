@@ -20,7 +20,7 @@ app.prepare().then(() => {
   // Attach Socket.io to the same server
   const io = new SocketIOServer(httpServer, {
     cors: {
-      origin: process.env.NEXT_PUBLIC_URL || "*",
+      origin: process.env.NEXT_PUBLIC_URL || true,
       methods: ["GET", "POST"],
     },
     path: "/api/socketio",

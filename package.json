@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "tsx watch server/index.ts",
+    "dev": "tsx scripts/dev.ts",
+    "dev:integrated": "tsx watch server/index.ts",
+    "signaling": "tsx server/signaling.ts",
     "build": "next build",
     "start": "NODE_ENV=production tsx server/index.ts",
     "lint": "eslint"
@@ -13,6 +15,7 @@
     "lucide-react": "^0.562.0",
     "motion": "^12.28.1",
     "next": "16.1.4",
+    "qrcode": "^1.5.4",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "socket.io": "^4.8.3",
@@ -24,6 +27,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/uuid": "^11.0.0",

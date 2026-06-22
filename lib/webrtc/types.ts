@@ -21,8 +21,17 @@ export type MessageType =
   | "file-start" // Multi-file: start of a file
   | "file-chunk" // Multi-file: chunk with fileId
   | "file-end" // Multi-file: end of a file
+  | "folder-start" // Folder batch: start
+  | "folder-end" // Folder batch: complete
   | "session-ready" // Connection ready for transfers
+  | "transfer-cancel" // Either peer cancelled the active transfer
   | "request-file"; // Receiver wants to send a file back
+
+export interface FolderInfo {
+  folderName: string;
+  fileCount: number;
+  totalSize: number;
+}
 
 /**
  * Message structure for file transfer protocol
@@ -31,6 +40,9 @@ export interface TransferMessage {
   type: MessageType;
   fileId?: string;
   metadata?: FileMetadata & { encryptedSize: number };
+  folderName?: string;
+  fileCount?: number;
+  totalSize?: number;
   chunkIndex?: number;
   totalChunks?: number;
 }
@@ -67,6 +79,14 @@ export interface StreamingReceiveResult {
   data: ArrayBuffer | null;
   metadata: FileMetadata;
   streamed: boolean;
+}
+
+/**
+ * Result of streaming send
+ */
+export interface StreamingSendResult {
+  streamed: boolean;
+  metadata: FileMetadata;
 }
 
 /**

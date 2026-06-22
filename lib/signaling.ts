@@ -20,31 +20,67 @@ class SignalingClient {
   }> = {};
 
   connect(serverUrl?: string): Promise<void> {
+    const urls = this.getSignalingUrls(serverUrl);
+
     return new Promise((resolve, reject) => {
-      // Connect to signaling server
-      // In production: same origin (integrated server)
-      // In development: can use separate server via env var
-      const url =
-        serverUrl ||
-        process.env.NEXT_PUBLIC_SIGNALING_URL ||
-        (typeof window !== "undefined"
-          ? window.location.origin
-          : "http://localhost:3001");
+      let attempt = 0;
 
-      this.socket = io(url, {
-        path: "/api/socketio",
-        transports: ["websocket", "polling"],
-      });
+      const tryConnect = () => {
+        if (attempt >= urls.length) {
+          reject(
+            new Error(
+              "Could not connect to signaling server. Run `bun run dev` to start the app with signaling.",
+            ),
+          );
+          return;
+        }
 
-      this.socket.on("connect", () => {
-        this.setupListeners();
-        resolve();
-      });
+        const url = urls[attempt++];
+        this.socket?.removeAllListeners();
+        this.socket?.disconnect();
 
-      this.socket.on("connect_error", (err) => {
-        reject(new Error(`Connection failed: ${err.message}`));
-      });
+        this.socket = io(url, {
+          path: "/api/socketio",
+          transports: ["websocket", "polling"],
+          reconnection: false,
+          timeout: 5000,
+        });
+
+        this.socket.once("connect", () => {
+          this.setupListeners();
+          resolve();
+        });
+
+        this.socket.once("connect_error", () => {
+          tryConnect();
+        });
+      };
+
+      tryConnect();
     });
+  }
+
+  /** Build candidate signaling URLs, preferring same-origin integrated server */
+  private getSignalingUrls(serverUrl?: string): string[] {
+    const candidates: string[] = [];
+
+    if (serverUrl) candidates.push(serverUrl);
+
+    if (typeof window !== "undefined") {
+      candidates.push(window.location.origin);
+    }
+
+    const envUrl = process.env.NEXT_PUBLIC_SIGNALING_URL;
+    if (envUrl) candidates.push(envUrl);
+
+    if (!candidates.includes("http://localhost:3000")) {
+      candidates.push("http://localhost:3000");
+    }
+    if (!candidates.includes("http://localhost:3001")) {
+      candidates.push("http://localhost:3001");
+    }
+
+    return [...new Set(candidates)];
   }
 
   private setupListeners() {

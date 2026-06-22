@@ -6,3 +6,4 @@ export * from "./constants";
 export * from "./connection";
 export * from "./transfer";
 export * from "./streaming";
+export * from "./folder-io";
