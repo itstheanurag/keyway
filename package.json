@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "tsx watch server/index.ts",
+    "dev": "tsx scripts/dev.ts",
+    "dev:integrated": "tsx watch server/index.ts",
+    "signaling": "tsx server/signaling.ts",
     "build": "next build",
     "start": "NODE_ENV=production tsx server/index.ts",
     "lint": "eslint"
