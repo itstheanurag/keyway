@@ -20,6 +20,8 @@ import {
   sendFolderStart,
   sendFolderEnd,
   receiveNextFile,
+  sendTransferCancel,
+  isTransferCancelled,
   generateFileId,
   DEFAULT_ICE_SERVERS,
 } from "@/lib/webrtc";
@@ -39,6 +41,13 @@ export type {
   TransferHistory,
   FileUploaderState,
 };
+
+function transferErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return fallback;
+}
 
 export function useFileUploader() {
   const [state, setState] = useState<FileUploaderState>({
@@ -65,6 +74,28 @@ export function useFileUploader() {
     isPasswordProtected: boolean;
     salt?: string;
   } | null>(null);
+  const transferAbortRef = useRef<AbortController | null>(null);
+
+  const beginTransferAbort = useCallback(() => {
+    transferAbortRef.current?.abort();
+    transferAbortRef.current = new AbortController();
+    return transferAbortRef.current;
+  }, []);
+
+  const cancelTransfer = useCallback(() => {
+    transferAbortRef.current?.abort();
+    transferAbortRef.current = null;
+    if (dataChannel.current?.readyState === "open") {
+      sendTransferCancel(dataChannel.current);
+    }
+    isSendingRef.current = false;
+    setState((prev) => ({
+      ...prev,
+      connectionState: prev.isConnected ? "ready" : "waiting",
+      progress: 0,
+      error: null,
+    }));
+  }, []);
 
   const updateState = useCallback((updates: Partial<FileUploaderState>) => {
     setState((prev) => ({ ...prev, ...updates }));
@@ -98,13 +129,18 @@ export function useFileUploader() {
         !isSendingRef.current
       ) {
         try {
-          const { data, metadata } = await receiveNextFile(channel, {
-            shouldAccept: () => !isSendingRef.current,
-            onMetadata: () => {
-              updateState({ connectionState: "transferring", progress: 0 });
+          const abort = beginTransferAbort();
+          const { data, metadata } = await receiveNextFile(
+            channel,
+            {
+              shouldAccept: () => !isSendingRef.current,
+              onMetadata: () => {
+                updateState({ connectionState: "transferring", progress: 0 });
+              },
+              onProgress: (progress) => updateState({ progress }),
             },
-            onProgress: (progress) => updateState({ progress }),
-          });
+            abort,
+          );
 
           const decryptedBlob = await decryptFile(data, key, metadata);
           downloadFile(decryptedBlob, metadata.name);
@@ -124,6 +160,14 @@ export function useFileUploader() {
             ],
           }));
         } catch (error) {
+          if (isTransferCancelled(error)) {
+            updateState({
+              connectionState: "ready",
+              progress: 0,
+              error: null,
+            });
+            break;
+          }
           if (channel.readyState !== "open") break;
           console.error("Incoming file receive error:", error);
           break;
@@ -133,7 +177,7 @@ export function useFileUploader() {
     };
 
     listen();
-  }, [downloadFile, updateState]);
+  }, [beginTransferAbort, downloadFile, updateState]);
 
   const sendQueuedFiles = useCallback(
     async (channel: RTCDataChannel, key: CryptoKey) => {
@@ -144,6 +188,7 @@ export function useFileUploader() {
       if (totalFiles === 0) return;
 
       isSendingRef.current = true;
+      const abort = beginTransferAbort();
       updateState({ connectionState: "transferring", progress: 0 });
 
       try {
@@ -189,6 +234,7 @@ export function useFileUploader() {
                 updateState({ progress: overall });
               },
               fileId,
+              abort,
             );
           } else {
             const { encrypted, metadata: fileMetadata } = await encryptFile(
@@ -213,6 +259,7 @@ export function useFileUploader() {
                 updateState({ progress: overall });
               },
               fileId,
+              abort,
             );
           }
 
@@ -240,14 +287,23 @@ export function useFileUploader() {
           progress: 100,
         }));
       } catch (error) {
-        console.error("Transfer error:", error);
-        updateState({ connectionState: "error", error: "Transfer failed" });
+        if (isTransferCancelled(error)) {
+          updateState({
+            connectionState: "ready",
+            progress: 0,
+            error: null,
+          });
+        } else {
+          const message = transferErrorMessage(error, "Transfer failed");
+          console.error("Transfer error:", error);
+          updateState({ connectionState: "error", error: message });
+        }
       } finally {
         isSendingRef.current = false;
         startListeningForIncomingFiles();
       }
     },
-    [updateState, startListeningForIncomingFiles],
+    [beginTransferAbort, updateState, startListeningForIncomingFiles],
   );
 
   const sendAdditionalFile = useCallback(
@@ -267,6 +323,7 @@ export function useFileUploader() {
 
       const fileId = generateFileId();
       isSendingRef.current = true;
+      const abort = beginTransferAbort();
       updateState({
         file,
         folder: null,
@@ -294,6 +351,7 @@ export function useFileUploader() {
             metadata,
             (progress) => updateState({ progress: 50 + progress * 0.5 }),
             fileId,
+            abort,
           );
         } else {
           const { encrypted, metadata } = await encryptFile(
@@ -309,6 +367,7 @@ export function useFileUploader() {
             metadata,
             (progress) => updateState({ progress: 50 + progress * 0.5 }),
             fileId,
+            abort,
           );
         }
 
@@ -327,14 +386,23 @@ export function useFileUploader() {
           ],
         }));
       } catch (error) {
-        console.error("Transfer error:", error);
-        updateState({ connectionState: "error", error: "Transfer failed" });
+        if (isTransferCancelled(error)) {
+          updateState({
+            connectionState: "ready",
+            progress: 0,
+            error: null,
+          });
+        } else {
+          const message = transferErrorMessage(error, "Transfer failed");
+          console.error("Transfer error:", error);
+          updateState({ connectionState: "error", error: message });
+        }
       } finally {
         isSendingRef.current = false;
         startListeningForIncomingFiles();
       }
     },
-    [updateState, startListeningForIncomingFiles],
+    [beginTransferAbort, updateState, startListeningForIncomingFiles],
   );
 
   const sendAdditionalFolder = useCallback(
@@ -535,6 +603,8 @@ export function useFileUploader() {
   );
 
   const reset = useCallback(() => {
+    transferAbortRef.current?.abort();
+    transferAbortRef.current = null;
     listeningForMore.current = false;
     isSendingRef.current = false;
     shareQueueRef.current = [];
@@ -572,6 +642,7 @@ export function useFileUploader() {
     handleFolderSelect,
     sendAdditionalFile,
     sendAdditionalFolder,
+    cancelTransfer,
     reset,
   };
 }

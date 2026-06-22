@@ -27,6 +27,7 @@ export default function FileUploader() {
     handleFolderSelect,
     sendAdditionalFile,
     sendAdditionalFolder,
+    cancelTransfer,
     reset: hookReset,
   } = useFileUploader();
 
@@ -324,6 +325,16 @@ export default function FileUploader() {
                   transition={{ type: "spring", stiffness: 50 }}
                 />
               </div>
+
+              {state.connectionState === "transferring" && (
+                <button
+                  type="button"
+                  onClick={cancelTransfer}
+                  className="w-full py-2.5 text-sm font-medium text-red-600 border border-red-200 rounded-xl hover:bg-red-50 transition-colors"
+                >
+                  Cancel transfer
+                </button>
+              )}
             </div>
 
             {/* Share Link & QR Code */}

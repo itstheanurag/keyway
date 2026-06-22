@@ -1,6 +1,10 @@
 const ALGORITHM = "AES-GCM";
 const KEY_LENGTH = 256;
 const IV_LENGTH = 12; // 96 bits for GCM
+const GCM_TAG_LENGTH = 16;
+
+/** Plaintext bytes encrypted per segment in streaming mode */
+export const ENCRYPT_READ_CHUNK_SIZE = 16 * 1024 * 1024;
 
 /**
  * Generate a new random encryption key
@@ -110,6 +114,65 @@ export async function decryptData(
   return await crypto.subtle.decrypt({ name: ALGORITHM, iv }, key, ciphertext);
 }
 
+function encryptedSegmentSize(plainSize: number): number {
+  return IV_LENGTH + plainSize + GCM_TAG_LENGTH;
+}
+
+export function estimateEncryptedPayloadSize(metadata: FileMetadata): number {
+  if (!metadata.encryptionChunkSize) {
+    return encryptedSegmentSize(metadata.size);
+  }
+
+  let total = 0;
+  let offset = 0;
+  while (offset < metadata.size) {
+    const plainChunk = Math.min(
+      metadata.encryptionChunkSize,
+      metadata.size - offset,
+    );
+    total += encryptedSegmentSize(plainChunk);
+    offset += plainChunk;
+  }
+  return total;
+}
+
+async function decryptSegmentedData(
+  encryptedData: ArrayBuffer,
+  key: CryptoKey,
+  totalPlainSize: number,
+  chunkSize: number,
+): Promise<ArrayBuffer> {
+  const parts: Uint8Array[] = [];
+  let plainOffset = 0;
+  let encOffset = 0;
+
+  while (plainOffset < totalPlainSize) {
+    const plainRemaining = totalPlainSize - plainOffset;
+    const thisPlainSize = Math.min(chunkSize, plainRemaining);
+    const thisEncSize = encryptedSegmentSize(thisPlainSize);
+
+    if (encOffset + thisEncSize > encryptedData.byteLength) {
+      throw new Error("Truncated encrypted file data");
+    }
+
+    const segment = encryptedData.slice(encOffset, encOffset + thisEncSize);
+    const decrypted = await decryptData(segment, key);
+    parts.push(new Uint8Array(decrypted));
+
+    plainOffset += thisPlainSize;
+    encOffset += thisEncSize;
+  }
+
+  const totalLength = parts.reduce((sum, part) => sum + part.byteLength, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.byteLength;
+  }
+  return result.buffer;
+}
+
 /**
  * Encrypt a File object
  */
@@ -130,6 +193,7 @@ export async function encryptFileStreaming(
     name: file.name,
     mimeType: file.type,
     size: file.size,
+    encryptionChunkSize: ENCRYPT_READ_CHUNK_SIZE,
     ...(path ? { relativePath: path } : {}),
   };
 
@@ -138,12 +202,13 @@ export async function encryptFileStreaming(
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        // Use a reasonable chunk size for reading (16MB)
-        const READ_CHUNK_SIZE = 16 * 1024 * 1024;
         let offset = 0;
 
         while (offset < fileSize) {
-          const chunk = file.slice(offset, offset + READ_CHUNK_SIZE);
+          const chunk = file.slice(
+            offset,
+            offset + ENCRYPT_READ_CHUNK_SIZE,
+          );
           const arrayBuffer = await chunk.arrayBuffer();
           const encrypted = await encryptData(arrayBuffer, key);
 
@@ -203,7 +268,14 @@ export async function decryptFile(
   key: CryptoKey,
   metadata: FileMetadata,
 ): Promise<Blob> {
-  const decrypted = await decryptData(encryptedData, key);
+  const decrypted = metadata.encryptionChunkSize
+    ? await decryptSegmentedData(
+        encryptedData,
+        key,
+        metadata.size,
+        metadata.encryptionChunkSize,
+      )
+    : await decryptData(encryptedData, key);
   return new Blob([decrypted], {
     type: metadata.mimeType || "application/octet-stream",
   });
@@ -240,4 +312,6 @@ export interface FileMetadata {
   relativePath?: string;
   isPasswordProtected?: boolean;
   salt?: string; // base64url encoded salt
+  /** Plaintext chunk size when file was encrypted in segments */
+  encryptionChunkSize?: number;
 }

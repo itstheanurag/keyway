@@ -19,6 +19,8 @@ import {
   openDirectoryPicker,
   saveFileToDirectory,
   flattenPathForDownload,
+  sendTransferCancel,
+  isTransferCancelled,
   generateFileId,
   DEFAULT_ICE_SERVERS,
 } from "@/lib/webrtc";
@@ -36,6 +38,12 @@ export type {
   TransferRecord,
   DownloaderState,
 };
+
+function toArrayBufferCopy(data: ArrayBufferView): ArrayBuffer {
+  const copy = new Uint8Array(data.byteLength);
+  copy.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+  return copy.buffer;
+}
 
 export function useFileDownloader(roomId: string, encryptionKey: string) {
   const isPasswordProtected = encryptionKey.startsWith("p_");
@@ -71,6 +79,10 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
   const pendingMetadata = useRef<
     (FileMetadata & { encryptedSize: number }) | null
   >(null);
+  const pendingBinaryChunks = useRef<ArrayBuffer[]>([]);
+  const initialMessageHandler = useRef<((e: MessageEvent) => void) | null>(
+    null,
+  );
   const pendingFolderRef = useRef<FolderShareInfo | null>(null);
   const directoryHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
   const fileStream = useRef<{
@@ -79,6 +91,50 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
   } | null>(null);
   const isSendingRef = useRef(false);
   const listeningForMore = useRef(false);
+  const transferAbortRef = useRef<AbortController | null>(null);
+
+  const beginTransferAbort = useCallback(() => {
+    transferAbortRef.current?.abort();
+    transferAbortRef.current = new AbortController();
+    return transferAbortRef.current;
+  }, []);
+
+  const abortPartialSave = useCallback(async () => {
+    if (!fileStream.current) return;
+    try {
+      await fileStream.current.writable.abort();
+    } catch {
+      // Ignore abort errors on partial files
+    }
+    fileStream.current = null;
+  }, []);
+
+  const cancelTransfer = useCallback(() => {
+    transferAbortRef.current?.abort();
+    transferAbortRef.current = null;
+
+    const channel = dataChannel.current || pendingChannel.current;
+    if (channel?.readyState === "open") {
+      sendTransferCancel(channel);
+    }
+
+    void abortPartialSave();
+    pendingMetadata.current = null;
+    pendingBinaryChunks.current = [];
+    pendingFolderRef.current = null;
+    isSendingRef.current = false;
+
+    setState((prev) => ({
+      ...prev,
+      connectionState: prev.isConnected ? "ready" : "waiting-for-metadata",
+      progress: 0,
+      error: null,
+      fileName: null,
+      fileSize: null,
+      folder: null,
+      folderProgress: null,
+    }));
+  }, [abortPartialSave]);
 
   const updateState = useCallback((updates: Partial<DownloaderState>) => {
     setState((prev) => {
@@ -136,17 +192,22 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         if (totalFiles > 0 && received >= totalFiles) break;
 
         try {
-          const { data, metadata } = await receiveNextFile(channel, {
-            shouldAccept: () => !isSendingRef.current,
-            onMetadata: (meta) => {
-              updateState({
-                fileName: meta.relativePath || meta.name,
-                fileSize: meta.size,
-                progress: 0,
-              });
+          const abort = beginTransferAbort();
+          const { data, metadata } = await receiveNextFile(
+            channel,
+            {
+              shouldAccept: () => !isSendingRef.current,
+              onMetadata: (meta) => {
+                updateState({
+                  fileName: meta.relativePath || meta.name,
+                  fileSize: meta.size,
+                  progress: 0,
+                });
+              },
+              onProgress: (progress) => updateState({ progress }),
             },
-            onProgress: (progress) => updateState({ progress }),
-          });
+            abort,
+          );
 
           updateState({ connectionState: "decrypting" });
 
@@ -173,6 +234,16 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
             ],
           }));
         } catch (error) {
+          if (isTransferCancelled(error)) {
+            updateState({
+              connectionState: "ready",
+              progress: 0,
+              error: null,
+              folder: null,
+              folderProgress: null,
+            });
+            return;
+          }
           if (channel.readyState !== "open") break;
           console.error("Folder receive error:", error);
           updateState({
@@ -195,7 +266,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         folderProgress: null,
       }));
     },
-    [saveReceivedFile, updateState],
+    [beginTransferAbort, saveReceivedFile, updateState],
   );
 
   const startListeningForMoreFiles = useCallback(() => {
@@ -221,18 +292,23 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
             error: null,
           });
 
-          const { data, metadata } = await receiveNextFile(channel, {
-            shouldAccept: () => !isSendingRef.current,
-            onMetadata: (meta) => {
-              updateState({
-                connectionState: "receiving",
-                fileName: meta.relativePath || meta.name,
-                fileSize: meta.size,
-                progress: 0,
-              });
+          const abort = beginTransferAbort();
+          const { data, metadata } = await receiveNextFile(
+            channel,
+            {
+              shouldAccept: () => !isSendingRef.current,
+              onMetadata: (meta) => {
+                updateState({
+                  connectionState: "receiving",
+                  fileName: meta.relativePath || meta.name,
+                  fileSize: meta.size,
+                  progress: 0,
+                });
+              },
+              onProgress: (progress) => updateState({ progress }),
             },
-            onProgress: (progress) => updateState({ progress }),
-          });
+            abort,
+          );
 
           updateState({ connectionState: "decrypting", progress: 100 });
 
@@ -256,6 +332,14 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
             ],
           }));
         } catch (error) {
+          if (isTransferCancelled(error)) {
+            updateState({
+              connectionState: "ready",
+              progress: 0,
+              error: null,
+            });
+            break;
+          }
           if (channel.readyState !== "open") break;
           console.error("Additional file receive error:", error);
           break;
@@ -265,7 +349,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
     };
 
     listen();
-  }, [saveReceivedFile, updateState]);
+  }, [beginTransferAbort, saveReceivedFile, updateState]);
 
   const sendFileBack = useCallback(
     async (file: File) => {
@@ -287,6 +371,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
 
       const fileId = generateFileId();
       isSendingRef.current = true;
+      const abort = beginTransferAbort();
       updateState({
         connectionState: "sending",
         progress: 0,
@@ -306,6 +391,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
           metadata,
           (progress) => updateState({ progress: 50 + progress * 0.5 }),
           fileId,
+          abort,
         );
 
         setState((prev) => ({
@@ -324,14 +410,25 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
           ],
         }));
       } catch (error) {
-        console.error("Send error:", error);
-        updateState({ connectionState: "error", error: "Failed to send file" });
+        if (isTransferCancelled(error)) {
+          updateState({
+            connectionState: "ready",
+            progress: 0,
+            error: null,
+          });
+        } else {
+          console.error("Send error:", error);
+          updateState({
+            connectionState: "error",
+            error: "Failed to send file",
+          });
+        }
       } finally {
         isSendingRef.current = false;
         startListeningForMoreFiles();
       }
     },
-    [updateState, startListeningForMoreFiles],
+    [beginTransferAbort, updateState, startListeningForMoreFiles],
   );
 
   const startStreamingReceive = useCallback(async () => {
@@ -348,7 +445,34 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
       return;
     }
 
-    updateState({ connectionState: "receiving", progress: 0 });
+    if (initialMessageHandler.current) {
+      channel.removeEventListener("message", initialMessageHandler.current);
+      initialMessageHandler.current = null;
+    }
+
+    const bufferedChunks = pendingBinaryChunks.current;
+    pendingBinaryChunks.current = [];
+
+    updateState({
+      connectionState: "receiving",
+      progress:
+        metadata.encryptedSize > 0
+          ? Math.min(
+              100,
+              Math.round(
+                (bufferedChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0) /
+                  metadata.encryptedSize) *
+                  100,
+              ),
+            )
+          : 0,
+    });
+
+    const abort = beginTransferAbort();
+
+    if (channel.readyState === "open") {
+      channel.send(JSON.stringify({ type: "session-ready" }));
+    }
 
     try {
       const {
@@ -360,6 +484,12 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         writable,
         (progress) => updateState({ progress }),
         () => {},
+        {
+          initialMetadata: metadata,
+          initialChunks: bufferedChunks,
+          abort,
+          onAbort: abortPartialSave,
+        },
       );
 
       if (streamed && fileStream.current) {
@@ -407,13 +537,31 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
       dataChannel.current = channel;
       startListeningForMoreFiles();
     } catch (error) {
+      if (isTransferCancelled(error)) {
+        pendingMetadata.current = null;
+        updateState({
+          connectionState: "ready",
+          progress: 0,
+          error: null,
+          fileName: null,
+          fileSize: null,
+        });
+        startListeningForMoreFiles();
+        return;
+      }
       console.error("Receive error:", error);
       updateState({
         connectionState: "error",
         error: "Failed to receive file",
       });
     }
-  }, [saveReceivedFile, updateState, startListeningForMoreFiles]);
+  }, [
+    abortPartialSave,
+    beginTransferAbort,
+    saveReceivedFile,
+    updateState,
+    startListeningForMoreFiles,
+  ]);
 
   const proceedWithSaveLocation = useCallback(async () => {
     const metadata = pendingMetadata.current;
@@ -507,7 +655,20 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
         channel.binaryType = "arraybuffer";
 
         const handleInitialMessage = (e: MessageEvent) => {
-          if (typeof e.data !== "string") return;
+          if (typeof e.data !== "string") {
+            if (pendingMetadata.current || pendingFolderRef.current) {
+              const chunk =
+                e.data instanceof ArrayBuffer
+                  ? e.data
+                  : ArrayBuffer.isView(e.data)
+                    ? toArrayBufferCopy(e.data)
+                    : null;
+              if (chunk) {
+                pendingBinaryChunks.current.push(chunk);
+              }
+            }
+            return;
+          }
 
           try {
             const msg = JSON.parse(e.data);
@@ -519,6 +680,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
                 totalSize: msg.totalSize,
               };
               channel.removeEventListener("message", handleInitialMessage);
+              initialMessageHandler.current = null;
 
               updateState({
                 folder: pendingFolderRef.current,
@@ -533,13 +695,16 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
               return;
             }
 
-            if (msg.type === "metadata") {
-              pendingMetadata.current = msg;
-              channel.removeEventListener("message", handleInitialMessage);
+            if (msg.type === "metadata" || msg.type === "file-start") {
+              const fileMetadata =
+                msg.type === "file-start" ? msg.metadata : msg;
+              if (!fileMetadata) return;
+
+              pendingMetadata.current = fileMetadata;
 
               updateState({
-                fileName: msg.name,
-                fileSize: msg.size,
+                fileName: fileMetadata.name,
+                fileSize: fileMetadata.size,
               });
 
               if (streamsSupported) {
@@ -553,6 +718,7 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
           }
         };
 
+        initialMessageHandler.current = handleInitialMessage;
         channel.addEventListener("message", handleInitialMessage);
       };
 
@@ -680,5 +846,6 @@ export function useFileDownloader(roomId: string, encryptionKey: string) {
     proceedWithSaveFolder,
     proceedWithFolderFallback,
     sendFileBack,
+    cancelTransfer,
   };
 }

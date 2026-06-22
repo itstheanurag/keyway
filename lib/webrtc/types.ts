@@ -24,6 +24,7 @@ export type MessageType =
   | "folder-start" // Folder batch: start
   | "folder-end" // Folder batch: complete
   | "session-ready" // Connection ready for transfers
+  | "transfer-cancel" // Either peer cancelled the active transfer
   | "request-file"; // Receiver wants to send a file back
 
 export interface FolderInfo {

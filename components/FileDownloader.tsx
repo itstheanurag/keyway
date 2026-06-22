@@ -33,7 +33,18 @@ export default function FileDownloader({
     proceedWithSaveFolder,
     proceedWithFolderFallback,
     sendFileBack,
+    cancelTransfer,
   } = useFileDownloader(roomId, encryptionKey);
+
+  const cancelButton = (
+    <button
+      type="button"
+      onClick={cancelTransfer}
+      className="w-full py-2.5 text-sm font-medium text-red-600 border border-red-200 rounded-xl hover:bg-red-50 transition-colors"
+    >
+      Cancel transfer
+    </button>
+  );
   const [password, setPassword] = useState("");
   const sendFileInput = useRef<HTMLInputElement>(null);
 
@@ -179,6 +190,7 @@ export default function FileDownloader({
                 ? "Pick a folder to preserve the directory structure, or download files individually"
                 : "Files will download individually with folder paths in their names"}
             </p>
+            <div className="pt-1">{cancelButton}</div>
           </div>
         </div>
       )}
@@ -223,6 +235,7 @@ export default function FileDownloader({
                 transition={{ type: "spring", stiffness: 50 }}
               />
             </div>
+            <div className="pt-2">{cancelButton}</div>
           </div>
         </div>
       )}
@@ -265,6 +278,7 @@ export default function FileDownloader({
               Choose a location to stream directly to disk, or quick download to
               browser default
             </p>
+            <div className="pt-1">{cancelButton}</div>
           </div>
         </div>
       )}
@@ -303,6 +317,7 @@ export default function FileDownloader({
                 transition={{ type: "spring", stiffness: 50 }}
               />
             </div>
+            <div className="pt-2">{cancelButton}</div>
           </div>
         </div>
       )}
@@ -341,6 +356,7 @@ export default function FileDownloader({
                 transition={{ type: "spring", stiffness: 50 }}
               />
             </div>
+            <div className="pt-2">{cancelButton}</div>
           </div>
         </div>
       )}
