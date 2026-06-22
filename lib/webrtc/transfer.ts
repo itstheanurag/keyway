@@ -2,6 +2,7 @@
 
 import type {
   FileMetadata,
+  FolderInfo,
   TransferMessage,
   ProgressCallback,
   MetadataCallback,
@@ -10,6 +11,32 @@ import type {
 } from "./types";
 import { CHUNK_SIZE } from "./constants";
 import { generateFileId } from "./connection";
+
+export function sendFolderStart(
+  channel: RTCDataChannel,
+  info: FolderInfo,
+): void {
+  channel.send(
+    JSON.stringify({
+      type: "folder-start",
+      folderName: info.folderName,
+      fileCount: info.fileCount,
+      totalSize: info.totalSize,
+    } as TransferMessage),
+  );
+}
+
+export function sendFolderEnd(
+  channel: RTCDataChannel,
+  folderName: string,
+): void {
+  channel.send(
+    JSON.stringify({
+      type: "folder-end",
+      folderName,
+    } as TransferMessage),
+  );
+}
 
 /**
  * Send file data over DataChannel with progress tracking
@@ -159,6 +186,98 @@ export function receiveFile(
       if (chunks.length === 0) {
         reject(new Error("Channel closed before receiving data"));
       }
+    };
+  });
+}
+
+export interface ReceiveNextFileCallbacks {
+  onProgress?: ProgressCallback;
+  onMetadata?: MetadataCallback;
+  /** Return false to ignore metadata (e.g. while sending a file back) */
+  shouldAccept?: () => boolean;
+}
+
+/**
+ * Receive the next file over an already-open DataChannel.
+ * Waits for metadata/file-start, buffers chunks, resolves on complete/file-end.
+ * Uses addEventListener so it can coexist with other listeners.
+ */
+export function receiveNextFile(
+  channel: RTCDataChannel,
+  callbacks?: ReceiveNextFileCallbacks,
+): Promise<ReceiveResult> {
+  return new Promise((resolve, reject) => {
+    const chunks: ArrayBuffer[] = [];
+    let metadata: TransferMetadata | null = null;
+    let receivedBytes = 0;
+    let receiving = false;
+
+    const cleanup = () => {
+      channel.removeEventListener("message", handler);
+    };
+
+    const handler = (event: MessageEvent) => {
+      try {
+        if (typeof event.data === "string") {
+          const msg = JSON.parse(event.data);
+
+          if (
+            (msg.type === "metadata" || msg.type === "file-start") &&
+            !receiving
+          ) {
+            if (callbacks?.shouldAccept && !callbacks.shouldAccept()) {
+              return;
+            }
+            receiving = true;
+            metadata =
+              msg.type === "file-start" ? msg.metadata : msg;
+            if (metadata) {
+              callbacks?.onMetadata?.(metadata);
+            }
+          } else if (
+            (msg.type === "complete" || msg.type === "file-end") &&
+            receiving
+          ) {
+            if (!metadata) {
+              cleanup();
+              reject(new Error("No metadata received"));
+              return;
+            }
+
+            const totalLength = chunks.reduce(
+              (sum, chunk) => sum + chunk.byteLength,
+              0,
+            );
+            const result = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+              result.set(new Uint8Array(chunk), offset);
+              offset += chunk.byteLength;
+            }
+
+            cleanup();
+            resolve({ data: result.buffer, metadata });
+          }
+        } else if (receiving) {
+          chunks.push(event.data);
+          receivedBytes += event.data.byteLength;
+
+          if (metadata?.encryptedSize) {
+            callbacks?.onProgress?.(
+              Math.round((receivedBytes / metadata.encryptedSize) * 100),
+            );
+          }
+        }
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    };
+
+    channel.addEventListener("message", handler);
+    channel.onerror = (e) => {
+      cleanup();
+      reject(new Error(`DataChannel error: ${e}`));
     };
   });
 }
