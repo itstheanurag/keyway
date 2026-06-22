@@ -10,6 +10,24 @@ interface Room {
 const rooms = new Map<string, Room>();
 const ROOM_TIMEOUT = 10 * 60 * 1000; // 10 minutes
 
+function devCorsOrigin(): string | string[] | boolean {
+  if (process.env.NEXT_PUBLIC_URL) {
+    return process.env.NEXT_PUBLIC_URL;
+  }
+
+  // Allow local dev on any common port (Next.js, integrated server, etc.)
+  if (process.env.NODE_ENV !== "production") {
+    return [
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+      "http://localhost:3001",
+      "http://127.0.0.1:3001",
+    ];
+  }
+
+  return true;
+}
+
 /**
  * Attach signaling handlers to a Socket.io server instance
  * This can be used with any http server (standalone or Next.js custom server)
@@ -128,13 +146,24 @@ export function createSignalingServer(port: number = 3001) {
   const httpServer = createServer();
   const io = new SocketIOServer(httpServer, {
     cors: {
-      origin: process.env.NEXT_PUBLIC_URL || "http://localhost:3000",
+      origin: devCorsOrigin(),
       methods: ["GET", "POST"],
     },
     path: "/api/socketio",
   });
 
   setupSignaling(io);
+
+  httpServer.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EADDRINUSE") {
+      console.error(
+        `Port ${port} is already in use. Stop the other process or set SIGNALING_PORT to a free port.`,
+      );
+      console.error(`  kill $(lsof -ti:${port})`);
+      process.exit(1);
+    }
+    throw error;
+  });
 
   httpServer.listen(port, () => {
     console.log(`Signaling server running on port ${port}`);
