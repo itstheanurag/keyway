@@ -10,10 +10,14 @@ import {
   generateSalt,
   arrayBufferToBase64Url,
 } from "@/lib/crypto";
+import { decryptFile } from "@/lib/crypto";
 import {
   createPeerConnection,
   createDataChannel,
   sendFile,
+  sendFolderStart,
+  sendFolderEnd,
+  receiveNextFile,
   generateFileId,
   DEFAULT_ICE_SERVERS,
 } from "@/lib/webrtc";
@@ -22,10 +26,12 @@ import type {
   UploaderConnectionState,
   TransferHistory,
   FileUploaderState,
+  FolderShareInfo,
 } from "@/lib/transfer";
+import type { ShareEntry } from "@/lib/folder";
+import { getFolderInfo, isFolderShare } from "@/lib/folder";
 import { signaling } from "@/lib/signaling";
 
-// Re-export types for consumers
 export type {
   UploaderConnectionState as ConnectionState,
   TransferHistory,
@@ -35,6 +41,7 @@ export type {
 export function useFileUploader() {
   const [state, setState] = useState<FileUploaderState>({
     file: null,
+    folder: null,
     shareUrl: null,
     connectionState: "idle",
     progress: 0,
@@ -48,16 +55,167 @@ export function useFileUploader() {
   const encryptionKey = useRef<CryptoKey | null>(null);
   const roomIdRef = useRef<string | null>(null);
   const shareTokenRef = useRef<string | null>(null);
+  const isSendingRef = useRef(false);
+  const listeningForMore = useRef(false);
+  const shareQueueRef = useRef<ShareEntry[]>([]);
+  const folderShareRef = useRef<FolderShareInfo | null>(null);
+  const passwordMetaRef = useRef<{
+    isPasswordProtected: boolean;
+    salt?: string;
+  } | null>(null);
 
   const updateState = useCallback((updates: Partial<FileUploaderState>) => {
     setState((prev) => ({ ...prev, ...updates }));
   }, []);
 
-  /**
-   * Send an additional file over the existing connection
-   */
+  const downloadFile = useCallback((blob: Blob, fileName: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, []);
+
+  const startListeningForIncomingFiles = useCallback(() => {
+    if (!dataChannel.current || dataChannel.current.readyState !== "open")
+      return;
+    if (!encryptionKey.current) return;
+    if (listeningForMore.current) return;
+
+    listeningForMore.current = true;
+    const channel = dataChannel.current;
+    const key = encryptionKey.current;
+
+    const listen = async () => {
+      while (
+        channel.readyState === "open" &&
+        listeningForMore.current &&
+        !isSendingRef.current
+      ) {
+        try {
+          const { data, metadata } = await receiveNextFile(channel, {
+            shouldAccept: () => !isSendingRef.current,
+            onMetadata: () => {
+              updateState({ connectionState: "transferring", progress: 0 });
+            },
+            onProgress: (progress) => updateState({ progress }),
+          });
+
+          const decryptedBlob = await decryptFile(data, key, metadata);
+          downloadFile(decryptedBlob, metadata.name);
+
+          setState((prev) => ({
+            ...prev,
+            connectionState: "ready",
+            progress: 100,
+            transferHistory: [
+              ...prev.transferHistory,
+              {
+                fileId: generateFileId(),
+                fileName: metadata.relativePath || metadata.name,
+                fileSize: metadata.size,
+                completedAt: new Date(),
+              },
+            ],
+          }));
+        } catch (error) {
+          if (channel.readyState !== "open") break;
+          console.error("Incoming file receive error:", error);
+          break;
+        }
+      }
+      listeningForMore.current = false;
+    };
+
+    listen();
+  }, [downloadFile, updateState]);
+
+  const sendQueuedFiles = useCallback(
+    async (channel: RTCDataChannel, key: CryptoKey) => {
+      const queue = shareQueueRef.current;
+      const folderInfo = folderShareRef.current;
+      const totalFiles = queue.length;
+
+      if (totalFiles === 0) return;
+
+      isSendingRef.current = true;
+      updateState({ connectionState: "transferring", progress: 0 });
+
+      try {
+        if (folderInfo) {
+          sendFolderStart(channel, {
+            folderName: folderInfo.name,
+            fileCount: folderInfo.fileCount,
+            totalSize: folderInfo.totalSize,
+          });
+        }
+
+        for (let i = 0; i < totalFiles; i++) {
+          const entry = queue[i];
+          const fileId = generateFileId();
+
+          const { encrypted, metadata } = await encryptFile(
+            entry.file,
+            key,
+            undefined,
+            entry.relativePath,
+          );
+
+          if (passwordMetaRef.current?.isPasswordProtected) {
+            metadata.isPasswordProtected = true;
+            metadata.salt = passwordMetaRef.current.salt;
+          }
+
+          await sendFile(
+            channel,
+            encrypted,
+            metadata,
+            (fileProgress) => {
+              const overall = ((i + fileProgress / 100) / totalFiles) * 100;
+              updateState({ progress: overall });
+            },
+            fileId,
+          );
+
+          setState((prev) => ({
+            ...prev,
+            transferHistory: [
+              ...prev.transferHistory,
+              {
+                fileId,
+                fileName: entry.relativePath,
+                fileSize: entry.file.size,
+                completedAt: new Date(),
+              },
+            ],
+          }));
+        }
+
+        if (folderInfo) {
+          sendFolderEnd(channel, folderInfo.name);
+        }
+
+        setState((prev) => ({
+          ...prev,
+          connectionState: "ready",
+          progress: 100,
+        }));
+      } catch (error) {
+        console.error("Transfer error:", error);
+        updateState({ connectionState: "error", error: "Transfer failed" });
+      } finally {
+        isSendingRef.current = false;
+        startListeningForIncomingFiles();
+      }
+    },
+    [updateState, startListeningForIncomingFiles],
+  );
+
   const sendAdditionalFile = useCallback(
-    async (file: File) => {
+    async (file: File, relativePath?: string) => {
       if (!dataChannel.current || dataChannel.current.readyState !== "open") {
         updateState({
           error: "Connection not ready",
@@ -72,8 +230,10 @@ export function useFileUploader() {
       }
 
       const fileId = generateFileId();
+      isSendingRef.current = true;
       updateState({
         file,
+        folder: null,
         connectionState: "transferring",
         progress: 0,
         error: null,
@@ -84,6 +244,7 @@ export function useFileUploader() {
           file,
           encryptionKey.current,
           (p) => updateState({ progress: p * 0.5 }),
+          relativePath,
         );
 
         await sendFile(
@@ -102,7 +263,7 @@ export function useFileUploader() {
             ...prev.transferHistory,
             {
               fileId,
-              fileName: file.name,
+              fileName: relativePath || file.name,
               fileSize: file.size,
               completedAt: new Date(),
             },
@@ -111,121 +272,138 @@ export function useFileUploader() {
       } catch (error) {
         console.error("Transfer error:", error);
         updateState({ connectionState: "error", error: "Transfer failed" });
+      } finally {
+        isSendingRef.current = false;
+        startListeningForIncomingFiles();
       }
     },
-    [updateState],
+    [updateState, startListeningForIncomingFiles],
   );
 
-  const setupWebRTC = useCallback(
-    (
-      encryptedData: ArrayBuffer,
-      fileMetadata: FileMetadata,
-      fileId: string,
-    ) => {
-      peerConnection.current = createPeerConnection({
-        iceServers: DEFAULT_ICE_SERVERS,
-      });
-      dataChannel.current = createDataChannel(peerConnection.current);
-
-      peerConnection.current.onicecandidate = (event) => {
-        if (event.candidate) {
-          signaling.sendIceCandidate(event.candidate.toJSON());
-        }
-      };
-
-      peerConnection.current.onconnectionstatechange = () => {
-        const connState = peerConnection.current?.connectionState;
-        if (connState === "connected") {
-          updateState({ isConnected: true });
-        } else if (connState === "disconnected" || connState === "failed") {
-          updateState({ isConnected: false });
-        }
-      };
-
-      signaling.on("peer-joined", async () => {
-        updateState({ connectionState: "connecting" });
-        try {
-          const offer = await peerConnection.current!.createOffer();
-          await peerConnection.current!.setLocalDescription(offer);
-          signaling.sendOffer(offer);
-        } catch (error) {
-          updateState({
-            connectionState: "error",
-            error: "Failed to create connection",
-          });
-        }
-      });
-
-      signaling.on("answer", async (sdp) => {
-        try {
-          await peerConnection.current!.setRemoteDescription(sdp);
-        } catch (error) {
-          console.error("Answer error:", error);
-        }
-      });
-
-      signaling.on("ice-candidate", async (candidate) => {
-        try {
-          await peerConnection.current!.addIceCandidate(candidate);
-        } catch (error) {
-          console.error("ICE error:", error);
-        }
-      });
-
-      dataChannel.current.onopen = async () => {
+  const sendAdditionalFolder = useCallback(
+    async (entries: ShareEntry[]) => {
+      if (!dataChannel.current || dataChannel.current.readyState !== "open") {
         updateState({
-          connectionState: "transferring",
-          progress: 0,
-          isConnected: true,
+          error: "Connection not ready",
+          connectionState: "error",
         });
-        try {
-          await sendFile(
-            dataChannel.current!,
-            encryptedData,
-            fileMetadata,
-            (progress) => updateState({ progress }),
-            fileId,
-          );
-
-          setState((prev) => ({
-            ...prev,
-            connectionState: "ready",
-            progress: 100,
-            transferHistory: [
-              ...prev.transferHistory,
-              {
-                fileId,
-                fileName: fileMetadata.name,
-                fileSize: fileMetadata.size,
-                completedAt: new Date(),
-              },
-            ],
-          }));
-        } catch (error) {
-          updateState({ connectionState: "error", error: "Transfer failed" });
-        }
-      };
-
-      signaling.on("peer-disconnected", () => {
-        updateState({
-          isConnected: false,
-          connectionState:
-            state.connectionState === "ready" ? "waiting" : "error",
-          error: state.connectionState === "ready" ? null : "Peer disconnected",
-        });
-      });
-    },
-    [state.connectionState, updateState],
-  );
-
-  const handleFileSelect = useCallback(
-    async (file: File, password?: string) => {
-      if (state.isConnected && dataChannel.current?.readyState === "open") {
-        return sendAdditionalFile(file);
+        return;
       }
+
+      if (!encryptionKey.current) {
+        updateState({ error: "No encryption key", connectionState: "error" });
+        return;
+      }
+
+      const folderInfo = getFolderInfo(entries);
+      folderShareRef.current = folderInfo;
+      shareQueueRef.current = entries;
 
       updateState({
-        file,
+        folder: folderInfo,
+        file: null,
+        error: null,
+      });
+
+      await sendQueuedFiles(dataChannel.current, encryptionKey.current);
+    },
+    [sendQueuedFiles, updateState],
+  );
+
+  const setupWebRTC = useCallback(() => {
+    peerConnection.current = createPeerConnection({
+      iceServers: DEFAULT_ICE_SERVERS,
+    });
+    dataChannel.current = createDataChannel(peerConnection.current);
+
+    peerConnection.current.onicecandidate = (event) => {
+      if (event.candidate) {
+        signaling.sendIceCandidate(event.candidate.toJSON());
+      }
+    };
+
+    peerConnection.current.onconnectionstatechange = () => {
+      const connState = peerConnection.current?.connectionState;
+      if (connState === "connected") {
+        updateState({ isConnected: true });
+      } else if (connState === "disconnected" || connState === "failed") {
+        updateState({ isConnected: false });
+      }
+    };
+
+    signaling.on("peer-joined", async () => {
+      updateState({ connectionState: "connecting" });
+      try {
+        const offer = await peerConnection.current!.createOffer();
+        await peerConnection.current!.setLocalDescription(offer);
+        signaling.sendOffer(offer);
+      } catch {
+        updateState({
+          connectionState: "error",
+          error: "Failed to create connection",
+        });
+      }
+    });
+
+    signaling.on("answer", async (sdp) => {
+      try {
+        await peerConnection.current!.setRemoteDescription(sdp);
+      } catch (error) {
+        console.error("Answer error:", error);
+      }
+    });
+
+    signaling.on("ice-candidate", async (candidate) => {
+      try {
+        await peerConnection.current!.addIceCandidate(candidate);
+      } catch (error) {
+        console.error("ICE error:", error);
+      }
+    });
+
+    dataChannel.current.onopen = async () => {
+      updateState({
+        connectionState: "transferring",
+        progress: 0,
+        isConnected: true,
+      });
+
+      if (encryptionKey.current) {
+        await sendQueuedFiles(dataChannel.current!, encryptionKey.current);
+      }
+    };
+
+    signaling.on("peer-disconnected", () => {
+      setState((prev) => ({
+        ...prev,
+        isConnected: false,
+        connectionState:
+          prev.connectionState === "ready" ? "waiting" : "error",
+        error: prev.connectionState === "ready" ? null : "Peer disconnected",
+      }));
+    });
+  }, [sendQueuedFiles, updateState]);
+
+  const handleShareSelect = useCallback(
+    async (entries: ShareEntry[], password?: string) => {
+      if (entries.length === 0) return;
+
+      if (state.isConnected && dataChannel.current?.readyState === "open") {
+        if (isFolderShare(entries)) {
+          return sendAdditionalFolder(entries);
+        }
+        return sendAdditionalFile(entries[0].file, entries[0].relativePath);
+      }
+
+      const folderInfo = isFolderShare(entries) ? getFolderInfo(entries) : null;
+      const primaryFile = entries[0].file;
+
+      shareQueueRef.current = entries;
+      folderShareRef.current = folderInfo;
+
+      updateState({
+        file: folderInfo ? null : primaryFile,
+        folder: folderInfo,
         shareUrl: null,
         connectionState: "creating",
         progress: 0,
@@ -242,29 +420,20 @@ export function useFileUploader() {
           salt = generateSalt();
           key = await deriveKeyFromPassword(password, salt);
           shareToken = `p_${arrayBufferToBase64Url(salt.buffer as ArrayBuffer)}`;
+          passwordMetaRef.current = {
+            isPasswordProtected: true,
+            salt: arrayBufferToBase64Url(salt.buffer as ArrayBuffer),
+          };
         } else {
           key = await generateKey();
           shareToken = await exportKey(key);
+          passwordMetaRef.current = null;
         }
 
         encryptionKey.current = key;
         shareTokenRef.current = shareToken;
 
-        updateState({ progress: 10 });
-        const { encrypted, metadata } = await encryptFile(
-          file,
-          encryptionKey.current,
-          (p) => {
-            updateState({ progress: 10 + p * 0.3 });
-          },
-        );
-
-        if (password && salt) {
-          metadata.isPasswordProtected = true;
-          metadata.salt = arrayBufferToBase64Url(salt.buffer as ArrayBuffer);
-        }
-
-        updateState({ progress: 40 });
+        updateState({ progress: 30 });
 
         await signaling.connect();
         updateState({ progress: 50 });
@@ -272,13 +441,12 @@ export function useFileUploader() {
         const roomId = uuidv4().slice(0, 8);
         roomIdRef.current = roomId;
         await signaling.createRoom(roomId);
-        updateState({ progress: 60 });
+        updateState({ progress: 70 });
 
         const shareUrl = `${window.location.origin}/d/${roomId}#${shareToken}`;
         updateState({ shareUrl, connectionState: "waiting", progress: 100 });
 
-        const fileId = generateFileId();
-        setupWebRTC(encrypted, metadata, fileId);
+        setupWebRTC();
       } catch (error) {
         console.error("Setup error:", error);
         updateState({
@@ -287,10 +455,35 @@ export function useFileUploader() {
         });
       }
     },
-    [updateState, setupWebRTC, sendAdditionalFile, state.isConnected],
+    [
+      updateState,
+      setupWebRTC,
+      sendAdditionalFile,
+      sendAdditionalFolder,
+      state.isConnected,
+    ],
+  );
+
+  const handleFileSelect = useCallback(
+    async (file: File, password?: string) => {
+      await handleShareSelect([{ file, relativePath: file.name }], password);
+    },
+    [handleShareSelect],
+  );
+
+  const handleFolderSelect = useCallback(
+    async (entries: ShareEntry[], password?: string) => {
+      await handleShareSelect(entries, password);
+    },
+    [handleShareSelect],
   );
 
   const reset = useCallback(() => {
+    listeningForMore.current = false;
+    isSendingRef.current = false;
+    shareQueueRef.current = [];
+    folderShareRef.current = null;
+    passwordMetaRef.current = null;
     dataChannel.current?.close();
     peerConnection.current?.close();
     signaling.disconnect();
@@ -299,6 +492,7 @@ export function useFileUploader() {
     encryptionKey.current = null;
     setState({
       file: null,
+      folder: null,
       shareUrl: null,
       connectionState: "idle",
       progress: 0,
@@ -319,7 +513,9 @@ export function useFileUploader() {
   return {
     state,
     handleFileSelect,
+    handleFolderSelect,
     sendAdditionalFile,
+    sendAdditionalFolder,
     reset,
   };
 }
