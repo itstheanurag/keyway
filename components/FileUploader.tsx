@@ -1,26 +1,55 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { Upload, X, Copy, Check, Lock, File as FileIcon } from "lucide-react";
+import { useState, useCallback, useRef } from "react";
+import {
+  Upload,
+  X,
+  Copy,
+  Check,
+  Lock,
+  File as FileIcon,
+  Plus,
+  Send,
+} from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useFileUploader } from "@/hooks/use-file-uploader";
 
 export default function FileUploader() {
-  const { state, handleFileSelect, reset: hookReset } = useFileUploader();
+  const {
+    state,
+    handleFileSelect,
+    sendAdditionalFile,
+    reset: hookReset,
+  } = useFileUploader();
 
   const [password, setPassword] = useState("");
   const [usePassword, setUsePassword] = useState(false);
   const [copied, setCopied] = useState(false);
+  const additionalFileInput = useRef<HTMLInputElement>(null);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
       const file = e.dataTransfer.files[0];
-      if (file)
-        handleFileSelect(file, usePassword && password ? password : undefined);
+      if (file) {
+        if (state.isConnected) {
+          sendAdditionalFile(file);
+        } else {
+          handleFileSelect(
+            file,
+            usePassword && password ? password : undefined,
+          );
+        }
+      }
     },
-    [handleFileSelect, usePassword, password],
+    [
+      handleFileSelect,
+      sendAdditionalFile,
+      usePassword,
+      password,
+      state.isConnected,
+    ],
   );
 
   const handleInputChange = useCallback(
@@ -30,6 +59,17 @@ export default function FileUploader() {
         handleFileSelect(file, usePassword && password ? password : undefined);
     },
     [handleFileSelect, usePassword, password],
+  );
+
+  const handleAdditionalFileChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file) {
+        sendAdditionalFile(file);
+        e.target.value = ""; // Reset input
+      }
+    },
+    [sendAdditionalFile],
   );
 
   const copyToClipboard = useCallback(() => {
@@ -46,6 +86,14 @@ export default function FileUploader() {
     setUsePassword(false);
   };
 
+  const formatBytes = (bytes: number) => {
+    if (bytes === 0) return "0 Bytes";
+    const k = 1024;
+    const sizes = ["Bytes", "KB", "MB", "GB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  };
+
   const getStatusText = () => {
     switch (state.connectionState) {
       case "idle":
@@ -58,6 +106,8 @@ export default function FileUploader() {
         return "Connecting to peer...";
       case "transferring":
         return "Transferring file...";
+      case "ready":
+        return "Connected - Ready for more files";
       case "complete":
         return "Transfer Completed";
       case "error":
@@ -170,9 +220,7 @@ export default function FileUploader() {
                   {state.file?.name}
                 </h4>
                 <p className="text-sm text-gray-500">
-                  {state.file
-                    ? (state.file.size / 1024 / 1024).toFixed(2) + " MB"
-                    : ""}
+                  {state.file ? formatBytes(state.file.size) : ""}
                 </p>
               </div>
             </div>
@@ -184,7 +232,9 @@ export default function FileUploader() {
                   className={
                     state.connectionState === "error"
                       ? "text-red-500"
-                      : "text-[var(--muted)]"
+                      : state.connectionState === "ready"
+                        ? "text-green-600"
+                        : "text-[var(--muted)]"
                   }
                 >
                   {state.error || getStatusText()}
@@ -196,7 +246,13 @@ export default function FileUploader() {
 
               <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                 <motion.div
-                  className={`h-full ${state.connectionState === "error" ? "bg-red-500" : "bg-orange-500"}`}
+                  className={`h-full ${
+                    state.connectionState === "error"
+                      ? "bg-red-500"
+                      : state.connectionState === "ready"
+                        ? "bg-green-500"
+                        : "bg-orange-500"
+                  }`}
                   initial={{ width: 0 }}
                   animate={{ width: `${state.progress}%` }}
                   transition={{ type: "spring", stiffness: 50 }}
@@ -237,6 +293,111 @@ export default function FileUploader() {
                   <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
                   Waiting for peer to connect...
                 </div>
+              </motion.div>
+            )}
+
+            {/* Ready State: Connected & Can Send More Files */}
+            {state.connectionState === "ready" && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mt-8 space-y-4"
+              >
+                {/* Transfer History */}
+                {state.transferHistory.length > 0 && (
+                  <div className="p-4 bg-green-50 rounded-2xl border border-green-100">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Check className="w-4 h-4 text-green-600" />
+                      <span className="text-xs font-bold uppercase tracking-wider text-green-700">
+                        Files Sent ({state.transferHistory.length})
+                      </span>
+                    </div>
+                    <div className="space-y-2">
+                      {state.transferHistory.map((transfer) => (
+                        <div
+                          key={transfer.fileId}
+                          className="flex items-center gap-2 text-sm text-green-700"
+                        >
+                          <FileIcon className="w-4 h-4" />
+                          <span className="truncate flex-1">
+                            {transfer.fileName}
+                          </span>
+                          <span className="text-xs text-green-600">
+                            {formatBytes(transfer.fileSize)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Send Another File Button */}
+                <div
+                  className="p-6 border-2 border-dashed border-green-200 rounded-2xl bg-green-50/50 hover:bg-green-50 hover:border-green-300 transition-all cursor-pointer text-center"
+                  onClick={() => additionalFileInput.current?.click()}
+                  onDrop={handleDrop}
+                  onDragOver={(e) => e.preventDefault()}
+                >
+                  <input
+                    ref={additionalFileInput}
+                    type="file"
+                    className="hidden"
+                    onChange={handleAdditionalFileChange}
+                  />
+                  <div className="flex items-center justify-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-green-100 flex items-center justify-center">
+                      <Plus className="w-5 h-5 text-green-600" />
+                    </div>
+                    <div className="text-left">
+                      <p className="font-medium text-green-700">
+                        Send Another File
+                      </p>
+                      <p className="text-xs text-green-600">
+                        Drop or click to add more files
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Share Link (still visible in ready state) */}
+                {state.shareUrl && (
+                  <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-gray-500">
+                        Share Link
+                      </span>
+                      <div className="flex items-center gap-1 text-xs text-green-600">
+                        <div className="w-2 h-2 rounded-full bg-green-500" />
+                        Connected
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        readOnly
+                        value={state.shareUrl}
+                        className="flex-1 bg-white border border-gray-300 rounded-xl px-3 py-2 text-sm text-gray-900 font-mono focus:outline-none"
+                      />
+                      <button
+                        onClick={copyToClipboard}
+                        className="p-2 bg-transparent border border-gray-200 rounded-xl hover:bg-orange-50 hover:border-orange-200 hover:text-orange-600 transition-colors"
+                      >
+                        {copied ? (
+                          <Check className="w-5 h-5" />
+                        ) : (
+                          <Copy className="w-5 h-5" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* End Session Button */}
+                <button
+                  onClick={reset}
+                  className="w-full py-3 rounded-xl border border-gray-200 text-gray-600 font-medium hover:bg-gray-50 transition-colors"
+                >
+                  End Session
+                </button>
               </motion.div>
             )}
 

@@ -3,14 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "dev:server": "tsx watch server/signaling.ts",
-    "dev:all": "concurrently \"bun run dev\" \"bun run dev:server\"",
+    "dev": "tsx watch server/index.ts",
     "build": "next build",
     "start": "NODE_ENV=production tsx server/index.ts",
-    "start:legacy": "next start",
-    "start:server": "tsx server/signaling.ts",
-    "start:all": "concurrently \"bun run start:legacy\" \"bun run start:server\"",
     "lint": "eslint"
   },
   "dependencies": {

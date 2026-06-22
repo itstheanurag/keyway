@@ -1,54 +1,44 @@
-// WebRTC peer connection and data channel management
+// File Transfer Functions
 
-import type { FileMetadata } from "./crypto";
-
-const CHUNK_SIZE = 16384; // 16KB chunks for DataChannel
-
-export interface PeerConfig {
-  iceServers: RTCIceServer[];
-}
-
-export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-];
-
-/**
- * Create a new RTCPeerConnection with default config
- */
-export function createPeerConnection(
-  config: PeerConfig = { iceServers: DEFAULT_ICE_SERVERS },
-): RTCPeerConnection {
-  return new RTCPeerConnection(config);
-}
-
-/**
- * Create data channel for file transfer (sender side)
- */
-export function createDataChannel(
-  pc: RTCPeerConnection,
-  label: string = "fileTransfer",
-): RTCDataChannel {
-  const channel = pc.createDataChannel(label, {
-    ordered: true,
-  });
-  channel.binaryType = "arraybuffer";
-  return channel;
-}
+import type {
+  FileMetadata,
+  TransferMessage,
+  ProgressCallback,
+  MetadataCallback,
+  ReceiveResult,
+  TransferMetadata,
+} from "./types";
+import { CHUNK_SIZE } from "./constants";
+import { generateFileId } from "./connection";
 
 /**
  * Send file data over DataChannel with progress tracking
+ * Supports optional fileId for multi-file transfers
  */
 export async function sendFile(
   channel: RTCDataChannel,
   encryptedData: ArrayBuffer,
   metadata: FileMetadata,
-  onProgress?: (progress: number) => void,
+  onProgress?: ProgressCallback,
+  fileId?: string,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
-      // Send metadata first
+      const id = fileId || generateFileId();
+
+      // Send file-start message (new protocol)
+      channel.send(
+        JSON.stringify({
+          type: "file-start",
+          fileId: id,
+          metadata: {
+            ...metadata,
+            encryptedSize: encryptedData.byteLength,
+          },
+        } as TransferMessage),
+      );
+
+      // Also send legacy metadata for backward compatibility
       channel.send(
         JSON.stringify({
           ...metadata,
@@ -67,7 +57,15 @@ export async function sendFile(
           const end = Math.min(start + CHUNK_SIZE, data.length);
 
           if (start >= data.length) {
-            // All chunks sent
+            // All chunks sent - send file-end (new protocol)
+            channel.send(
+              JSON.stringify({
+                type: "file-end",
+                fileId: id,
+              } as TransferMessage),
+            );
+
+            // Also send legacy complete for backward compatibility
             channel.send(JSON.stringify({ type: "complete" }));
             resolve();
             return;
@@ -102,12 +100,12 @@ export async function sendFile(
  */
 export function receiveFile(
   channel: RTCDataChannel,
-  onProgress?: (progress: number) => void,
-  onMetadata?: (metadata: FileMetadata & { encryptedSize: number }) => void,
-): Promise<{ data: ArrayBuffer; metadata: FileMetadata }> {
+  onProgress?: ProgressCallback,
+  onMetadata?: MetadataCallback,
+): Promise<ReceiveResult> {
   return new Promise((resolve, reject) => {
     const chunks: ArrayBuffer[] = [];
-    let metadata: (FileMetadata & { encryptedSize: number }) | null = null;
+    let metadata: TransferMetadata | null = null;
     let receivedBytes = 0;
 
     channel.binaryType = "arraybuffer";
