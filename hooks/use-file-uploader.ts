@@ -6,6 +6,7 @@ import {
   generateKey,
   exportKey,
   encryptFile,
+  encryptFileStreaming,
   deriveKeyFromPassword,
   generateSalt,
   arrayBufferToBase64Url,
@@ -15,6 +16,7 @@ import {
   createPeerConnection,
   createDataChannel,
   sendFile,
+  sendFileStreaming,
   sendFolderStart,
   sendFolderEnd,
   receiveNextFile,
@@ -157,28 +159,62 @@ export function useFileUploader() {
           const entry = queue[i];
           const fileId = generateFileId();
 
-          const { encrypted, metadata } = await encryptFile(
-            entry.file,
-            key,
-            undefined,
-            entry.relativePath,
-          );
+          // Use streaming for files larger than 100MB to avoid memory issues
+          const USE_STREAMING_THRESHOLD = 100 * 1024 * 1024;
+          const useStreaming = entry.file.size > USE_STREAMING_THRESHOLD;
 
-          if (passwordMetaRef.current?.isPasswordProtected) {
-            metadata.isPasswordProtected = true;
-            metadata.salt = passwordMetaRef.current.salt;
+          let metadata: FileMetadata;
+
+          if (useStreaming) {
+            const { stream, metadata: fileMetadata } =
+              await encryptFileStreaming(
+                entry.file,
+                key,
+                undefined,
+                entry.relativePath,
+              );
+            metadata = fileMetadata;
+
+            if (passwordMetaRef.current?.isPasswordProtected) {
+              metadata.isPasswordProtected = true;
+              metadata.salt = passwordMetaRef.current.salt;
+            }
+
+            await sendFileStreaming(
+              channel,
+              stream,
+              metadata,
+              (fileProgress) => {
+                const overall = ((i + fileProgress / 100) / totalFiles) * 100;
+                updateState({ progress: overall });
+              },
+              fileId,
+            );
+          } else {
+            const { encrypted, metadata: fileMetadata } = await encryptFile(
+              entry.file,
+              key,
+              undefined,
+              entry.relativePath,
+            );
+            metadata = fileMetadata;
+
+            if (passwordMetaRef.current?.isPasswordProtected) {
+              metadata.isPasswordProtected = true;
+              metadata.salt = passwordMetaRef.current.salt;
+            }
+
+            await sendFile(
+              channel,
+              encrypted,
+              metadata,
+              (fileProgress) => {
+                const overall = ((i + fileProgress / 100) / totalFiles) * 100;
+                updateState({ progress: overall });
+              },
+              fileId,
+            );
           }
-
-          await sendFile(
-            channel,
-            encrypted,
-            metadata,
-            (fileProgress) => {
-              const overall = ((i + fileProgress / 100) / totalFiles) * 100;
-              updateState({ progress: overall });
-            },
-            fileId,
-          );
 
           setState((prev) => ({
             ...prev,
@@ -240,20 +276,41 @@ export function useFileUploader() {
       });
 
       try {
-        const { encrypted, metadata } = await encryptFile(
-          file,
-          encryptionKey.current,
-          (p) => updateState({ progress: p * 0.5 }),
-          relativePath,
-        );
+        // Use streaming for files larger than 100MB
+        const USE_STREAMING_THRESHOLD = 100 * 1024 * 1024;
+        const useStreaming = file.size > USE_STREAMING_THRESHOLD;
 
-        await sendFile(
-          dataChannel.current!,
-          encrypted,
-          metadata,
-          (progress) => updateState({ progress: 50 + progress * 0.5 }),
-          fileId,
-        );
+        if (useStreaming) {
+          const { stream, metadata } = await encryptFileStreaming(
+            file,
+            encryptionKey.current,
+            (p) => updateState({ progress: p * 0.5 }),
+            relativePath,
+          );
+
+          await sendFileStreaming(
+            dataChannel.current!,
+            stream,
+            metadata,
+            (progress) => updateState({ progress: 50 + progress * 0.5 }),
+            fileId,
+          );
+        } else {
+          const { encrypted, metadata } = await encryptFile(
+            file,
+            encryptionKey.current,
+            (p) => updateState({ progress: p * 0.5 }),
+            relativePath,
+          );
+
+          await sendFile(
+            dataChannel.current!,
+            encrypted,
+            metadata,
+            (progress) => updateState({ progress: 50 + progress * 0.5 }),
+            fileId,
+          );
+        }
 
         setState((prev) => ({
           ...prev,
@@ -377,8 +434,7 @@ export function useFileUploader() {
       setState((prev) => ({
         ...prev,
         isConnected: false,
-        connectionState:
-          prev.connectionState === "ready" ? "waiting" : "error",
+        connectionState: prev.connectionState === "ready" ? "waiting" : "error",
         error: prev.connectionState === "ready" ? null : "Peer disconnected",
       }));
     });

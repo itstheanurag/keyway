@@ -63,10 +63,15 @@ bun install
 ### Development
 
 ```bash
-# Start both frontend and signaling server
-npm run dev:all
+# Start both frontend and signaling server (separate ports)
+npm run dev
 # or
-bun run dev:all
+bun run dev
+
+# Or run the integrated server (single port)
+npm run dev:integrated
+# or
+bun run dev:integrated
 ```
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
@@ -77,8 +82,11 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 # Build the frontend
 npm run build
 
-# Start production servers
-npm run start:all
+# Start production server (integrated)
+npm run start
+
+# Or run the standalone signaling server
+npm run signaling
 ```
 
 ## Project Structure
@@ -99,8 +107,9 @@ keyway/
 │   └── use-file-downloader.ts
 ├── lib/                   # Core utilities
 │   ├── crypto.ts          # Encryption functions
-│   ├── peer.ts            # WebRTC helpers
-│   └── signaling.ts       # Socket.io client
+│   ├── webrtc/            # WebRTC helpers
+│   ├── signaling.ts       # Socket.io client
+│   └── ...               # Other utilities
 ├── server/                # Signaling server
 │   └── signaling.ts       # WebSocket server
 └── public/                # Static assets
@@ -158,14 +167,13 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed deployment instructions.
 
 ## Scripts
 
-| Command              | Description                       |
-| -------------------- | --------------------------------- |
-| `npm run dev`        | Start Next.js development server  |
-| `npm run dev:server` | Start signaling server (dev mode) |
-| `npm run dev:all`    | Start both concurrently           |
-| `npm run build`      | Build for production              |
-| `npm run start`      | Start production Next.js server   |
-| `npm run start:all`  | Start both production servers     |
+| Command                  | Description                                 |
+| ------------------------ | ------------------------------------------- |
+| `npm run dev`            | Start Next.js + standalone signaling server |
+| `npm run dev:integrated` | Start integrated server (single port)       |
+| `npm run signaling`      | Start standalone signaling server           |
+| `npm run build`          | Build for production                        |
+| `npm run start`          | Start production integrated server          |
 
 ## Tech Stack
 
@@ -181,7 +189,7 @@ Contributions are welcome! Please open an issue or submit a pull request.
 
 ## License
 
-MIT License — see [LICENSE](./LICENSE) for details.
+Apache 2.0 License — see [LICENSE](./LICENSE) for details.
 
 ---
 

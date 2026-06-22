@@ -7,10 +7,82 @@ import type {
   ProgressCallback,
   MetadataCallback,
   ReceiveResult,
+  StreamingSendResult,
   TransferMetadata,
 } from "./types";
 import { CHUNK_SIZE } from "./constants";
 import { generateFileId } from "./connection";
+
+const MAX_BUFFERED_BYTES = CHUNK_SIZE * 10;
+
+/**
+ * Copy bytes into a standalone ArrayBuffer for reliable cross-browser DataChannel sends.
+ * Avoids SharedArrayBuffer typing issues and subarray/view pitfalls in older engines.
+ */
+function toArrayBufferCopy(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+function sendBinaryChunk(channel: RTCDataChannel, bytes: Uint8Array): void {
+  channel.send(toArrayBufferCopy(bytes));
+}
+
+function waitForBufferSpace(channel: RTCDataChannel): Promise<void> {
+  if (channel.bufferedAmount <= MAX_BUFFERED_BYTES) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      channel.removeEventListener("bufferedamountlow", onBufferedAmountLow);
+      if (pollTimer !== undefined) {
+        clearTimeout(pollTimer);
+      }
+      resolve();
+    };
+
+    const onBufferedAmountLow = () => {
+      if (channel.bufferedAmount <= MAX_BUFFERED_BYTES) {
+        finish();
+      }
+    };
+
+    if ("bufferedAmountLowThreshold" in channel) {
+      channel.bufferedAmountLowThreshold = MAX_BUFFERED_BYTES;
+      channel.addEventListener("bufferedamountlow", onBufferedAmountLow);
+    }
+
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    const poll = () => {
+      if (channel.bufferedAmount <= MAX_BUFFERED_BYTES) {
+        finish();
+        return;
+      }
+      pollTimer = setTimeout(poll, 50);
+    };
+    poll();
+  });
+}
+
+function asArrayBuffer(data: unknown): ArrayBuffer {
+  if (data instanceof ArrayBuffer) {
+    return data;
+  }
+  if (ArrayBuffer.isView(data)) {
+    const view = new Uint8Array(
+      data.buffer,
+      data.byteOffset,
+      data.byteLength,
+    );
+    return toArrayBufferCopy(view);
+  }
+  throw new Error("Expected binary ArrayBuffer chunk");
+}
 
 export function sendFolderStart(
   channel: RTCDataChannel,
@@ -78,12 +150,98 @@ export async function sendFile(
       const totalChunks = Math.ceil(data.length / CHUNK_SIZE);
       let sentChunks = 0;
 
-      const sendNextChunk = () => {
-        while (channel.bufferedAmount < CHUNK_SIZE * 10) {
-          const start = sentChunks * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, data.length);
+      const sendNextChunk = async () => {
+        try {
+          while (channel.bufferedAmount <= MAX_BUFFERED_BYTES) {
+            const start = sentChunks * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, data.length);
 
-          if (start >= data.length) {
+            if (start >= data.length) {
+              // All chunks sent - send file-end (new protocol)
+              channel.send(
+                JSON.stringify({
+                  type: "file-end",
+                  fileId: id,
+                } as TransferMessage),
+              );
+
+              // Also send legacy complete for backward compatibility
+              channel.send(JSON.stringify({ type: "complete" }));
+              resolve();
+              return;
+            }
+
+            sendBinaryChunk(channel, data.slice(start, end));
+            sentChunks++;
+            onProgress?.(Math.round((sentChunks / totalChunks) * 100));
+          }
+
+          await waitForBufferSpace(channel);
+          sendNextChunk();
+        } catch (error) {
+          reject(error);
+        }
+      };
+
+      // Wait for channel to be ready
+      if (channel.readyState === "open") {
+        sendNextChunk();
+      } else {
+        channel.onopen = () => sendNextChunk();
+      }
+
+      channel.onerror = (e) => reject(new Error(`DataChannel error: ${e}`));
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+/**
+ * Send file data from a stream over DataChannel
+ * This allows sending large files without loading them entirely into memory
+ */
+export async function sendFileStreaming(
+  channel: RTCDataChannel,
+  stream: ReadableStream<Uint8Array>,
+  metadata: FileMetadata,
+  onProgress?: ProgressCallback,
+  fileId?: string,
+): Promise<StreamingSendResult> {
+  return new Promise((resolve, reject) => {
+    try {
+      const id = fileId || generateFileId();
+      let totalBytesSent = 0;
+      const expectedSize = metadata.size;
+
+      // Send file-start message (new protocol)
+      channel.send(
+        JSON.stringify({
+          type: "file-start",
+          fileId: id,
+          metadata: {
+            ...metadata,
+            encryptedSize: expectedSize,
+          },
+        } as TransferMessage),
+      );
+
+      // Also send legacy metadata for backward compatibility
+      channel.send(
+        JSON.stringify({
+          ...metadata,
+          type: "metadata",
+          encryptedSize: expectedSize,
+        }),
+      );
+
+      const reader = stream.getReader();
+
+      const pump = async () => {
+        try {
+          const { done, value } = await reader.read();
+
+          if (done) {
             // All chunks sent - send file-end (new protocol)
             channel.send(
               JSON.stringify({
@@ -94,25 +252,31 @@ export async function sendFile(
 
             // Also send legacy complete for backward compatibility
             channel.send(JSON.stringify({ type: "complete" }));
-            resolve();
+            resolve({ streamed: true, metadata });
             return;
           }
 
-          const chunk = data.slice(start, end);
-          channel.send(chunk);
-          sentChunks++;
-          onProgress?.(Math.round((sentChunks / totalChunks) * 100));
-        }
+          if (value) {
+            await waitForBufferSpace(channel);
+            sendBinaryChunk(channel, value);
+            totalBytesSent += value.byteLength;
 
-        // Wait for buffer to drain
-        setTimeout(sendNextChunk, 50);
+            if (expectedSize > 0) {
+              onProgress?.(Math.round((totalBytesSent / expectedSize) * 100));
+            }
+          }
+
+          pump();
+        } catch (error) {
+          reject(error);
+        }
       };
 
       // Wait for channel to be ready
       if (channel.readyState === "open") {
-        sendNextChunk();
+        pump();
       } else {
-        channel.onopen = () => sendNextChunk();
+        channel.onopen = () => pump();
       }
 
       channel.onerror = (e) => reject(new Error(`DataChannel error: ${e}`));
@@ -167,8 +331,9 @@ export function receiveFile(
           }
         } else {
           // Binary chunk
-          chunks.push(event.data);
-          receivedBytes += event.data.byteLength;
+          const chunk = asArrayBuffer(event.data);
+          chunks.push(chunk);
+          receivedBytes += chunk.byteLength;
 
           if (metadata?.encryptedSize) {
             onProgress?.(
@@ -212,6 +377,8 @@ export function receiveNextFile(
     let receivedBytes = 0;
     let receiving = false;
 
+    channel.binaryType = "arraybuffer";
+
     const cleanup = () => {
       channel.removeEventListener("message", handler);
     };
@@ -229,8 +396,7 @@ export function receiveNextFile(
               return;
             }
             receiving = true;
-            metadata =
-              msg.type === "file-start" ? msg.metadata : msg;
+            metadata = msg.type === "file-start" ? msg.metadata : msg;
             if (metadata) {
               callbacks?.onMetadata?.(metadata);
             }
@@ -259,8 +425,9 @@ export function receiveNextFile(
             resolve({ data: result.buffer, metadata });
           }
         } else if (receiving) {
-          chunks.push(event.data);
-          receivedBytes += event.data.byteLength;
+          const chunk = asArrayBuffer(event.data);
+          chunks.push(chunk);
+          receivedBytes += chunk.byteLength;
 
           if (metadata?.encryptedSize) {
             callbacks?.onProgress?.(

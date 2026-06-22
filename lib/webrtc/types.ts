@@ -81,6 +81,14 @@ export interface StreamingReceiveResult {
 }
 
 /**
+ * Result of streaming send
+ */
+export interface StreamingSendResult {
+  streamed: boolean;
+  metadata: FileMetadata;
+}
+
+/**
  * File save stream handle
  */
 export interface FileSaveStream {

@@ -113,6 +113,63 @@ export async function decryptData(
 /**
  * Encrypt a File object
  */
+/**
+ * Encrypt a File object in chunks to avoid memory issues
+ * Returns a readable stream of encrypted chunks
+ */
+export async function encryptFileStreaming(
+  file: File,
+  key: CryptoKey,
+  onProgress?: (progress: number) => void,
+  relativePath?: string,
+): Promise<{ stream: ReadableStream<Uint8Array>; metadata: FileMetadata }> {
+  const fileSize = file.size;
+  const path = relativePath || file.webkitRelativePath;
+
+  const metadata: FileMetadata = {
+    name: file.name,
+    mimeType: file.type,
+    size: file.size,
+    ...(path ? { relativePath: path } : {}),
+  };
+
+  let bytesProcessed = 0;
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        // Use a reasonable chunk size for reading (16MB)
+        const READ_CHUNK_SIZE = 16 * 1024 * 1024;
+        let offset = 0;
+
+        while (offset < fileSize) {
+          const chunk = file.slice(offset, offset + READ_CHUNK_SIZE);
+          const arrayBuffer = await chunk.arrayBuffer();
+          const encrypted = await encryptData(arrayBuffer, key);
+
+          controller.enqueue(new Uint8Array(encrypted));
+          bytesProcessed += chunk.size;
+          offset += chunk.size;
+
+          if (onProgress) {
+            onProgress(Math.round((bytesProcessed / fileSize) * 100));
+          }
+        }
+
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+  });
+
+  return { stream, metadata };
+}
+
+/**
+ * Encrypt a File object (legacy - loads entire file into memory)
+ * Use encryptFileStreaming for large files
+ */
 export async function encryptFile(
   file: File,
   key: CryptoKey,
